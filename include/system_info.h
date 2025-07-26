@@ -54,7 +54,7 @@ struct system_info {
 	int num_devices = 0;
     size_t max_work_group_size = 0;
     size_t max_compute_units = 0;
-    uint64_t total_global_memory = 0;
+    int total_global_memory = 0;
     size_t host_page_size = 4096;
 };
 
