@@ -95,7 +95,7 @@ else()
   endif()
 endif()
 
-set(CELERITY_DPCPP_TARGETS "spir64" CACHE STRING "Intel DPC++ targets")
+set(CELERITY_DPCPP_TARGETS "spir64_gen" CACHE STRING "Intel DPC++ targets")
 if(CELERITY_SYCL_IMPL STREQUAL "DPC++")
   message(STATUS "DPC++ will target ${CELERITY_DPCPP_TARGETS}")
 endif()
