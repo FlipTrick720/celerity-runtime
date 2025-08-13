@@ -19,7 +19,7 @@ export ONEAPI_DEVICE_SELECTOR="level_zero:*"
 cd ~/testApproach/celerity-runtime/build_2025-08-13_16-18-36/test/
 
 # Run
-echo "backend_tests"
-./backend_tests
-#echo "all_tests"
-#./all_tests
+#echo "backend_tests"
+#./backend_tests
+echo "all_tests"
+./all_tests
