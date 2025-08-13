@@ -77,6 +77,10 @@ class backend {
 
 	/// Check internal queues and panic if any asynchronous errors occurred.
 	virtual void check_async_errors() = 0;
+
+	using device_kernel_launcher = std::function<void(sycl::handler& sycl_cgh, 
+													const box<3>& execution_range, 
+													const std::vector<void*>& reduction_ptrs)>;
 };
 
 } // namespace celerity::detail

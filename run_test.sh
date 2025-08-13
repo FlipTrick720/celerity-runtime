@@ -16,7 +16,7 @@ source /opt/intel/oneapi/setvars.sh
 export ONEAPI_DEVICE_SELECTOR="level_zero:*" 
 
 # Navigate to your build directory
-cd ~/testApproach/celerity-runtime/currentBuild/test/
+cd ~/testApproach/celerity-runtime/build_2025-08-13_16-18-36/test/
 
 # Run
 echo "backend_tests"

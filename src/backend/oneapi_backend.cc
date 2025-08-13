@@ -1,4 +1,3 @@
-// src/backend/oneapi_backend.cc
 #include "backend/oneapi_backend.h"
 #include "closure_hydrator.h"
 #include "async_event.h"
@@ -11,10 +10,13 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <sycl/ext/oneapi/backend/level_zero.hpp>
 #include <sycl/sycl.hpp>
+#include <sycl/backend.hpp>
 
 namespace celerity::detail {
 
+class ze_event_impl;
 async_event make_event_from_ze(ze_event_handle_t start, ze_event_handle_t end, ze_event_pool_handle_t pool);
 async_event make_event_from_ze(ze_event_handle_t evt, ze_event_pool_handle_t pool, bool owns_pool);
 
@@ -93,16 +95,14 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
         st.device = dev;
         st.context = m_context;
 
-        // Create command queue - EXPLICIT_ONLY flag required for ARC
-        ze_command_queue_desc_t queueDesc = {
-            ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC,
-            nullptr,
-            0, // ordinal
-            0, // index
-            ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS,
-            ZE_COMMAND_QUEUE_PRIORITY_NORMAL,
-            ZE_COMMAND_QUEUE_FLAG_EXPLICIT_ONLY
-        };
+        // Create command queue
+        ze_command_queue_desc_t queueDesc = {};
+        queueDesc.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+        queueDesc.ordinal = 0;
+        queueDesc.index = 0;
+        queueDesc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+        queueDesc.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
+        queueDesc.flags = ZE_COMMAND_QUEUE_FLAG_EXPLICIT_ONLY;
         
         ze_command_queue_handle_t cmdQueue = nullptr;
         ze_check(zeCommandQueueCreate(m_context, dev, &queueDesc, &cmdQueue),
@@ -122,10 +122,15 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
     for(const auto& dev : devices) {
         ze_device_properties_t props{};
         ze_check(zeDeviceGetProperties(dev, &props), "zeDeviceGetProperties");
+
+        ze_device_compute_properties_t computeProps{};
+        ze_check(zeDeviceGetComputeProperties(dev, &computeProps), "zeDeviceGetComputeProperties");
+        
+        // Use maxTotalGroupSize for work group size
+        m_system.max_work_group_size = computeProps.maxTotalGroupSize;
         
         // Intel ARC specific properties
         if(props.vendorId == 0x8086) {
-            m_system.max_work_group_size = props.maxGroupSizeX;
             m_system.max_compute_units = props.numSlices * props.numSubslicesPerSlice * props.numEUsPerSubslice;
         }
     }
@@ -236,122 +241,56 @@ async_event oneapi_backend::enqueue_host_task(size_t host_lane,
     );
 }
 
-async_event oneapi_backend::enqueue_device_kernel(device_id did, size_t lane, 
+async_event oneapi_backend::enqueue_device_kernel(device_id did, size_t lane,
     const device_kernel_launcher& launch,
-    std::vector<closure_hydrator::accessor_info> infos, 
-    const box<3>& execution_range, 
+    std::vector<closure_hydrator::accessor_info> infos,
+    const box<3>& execution_range,
     const std::vector<void*>& reduction_ptrs) {
+
+  return enqueue_work(did, lane,
+    [this, launch, infos = std::move(infos), execution_range, reduction_ptrs](device_state& st) -> async_event {
+
+    // 1) Build a sycl::device from the native handle:
+    sycl::device dev =
+      sycl::make_device<sycl::backend::ext_oneapi_level_zero>(st.device);
+        
+    // 2) Wrap the native context + device list:
+    using ctx_input_t = sycl::backend_input_t<
+      sycl::backend::ext_oneapi_level_zero, sycl::context>;
+    ctx_input_t ctxInput{
+      st.context,                        // ze_context_handle_t
+      std::vector<sycl::device>{dev},    // must list at least one device
+      sycl::ext::oneapi::level_zero::ownership::keep
+    };
     
-    return enqueue_work(did, lane, [this, launch, infos = std::move(infos), 
-                         execution_range, reduction_ptrs](device_state& st) -> async_event {
-        // 1. Hydrate accessors
-        std::vector<void*> ptrs;
-        ptrs.reserve(infos.size());
-        for(const auto& info : infos) ptrs.push_back(info.ptr);
+    // 3) Create the SYCL context:
+    sycl::context ctx =
+      sycl::make_context<sycl::backend::ext_oneapi_level_zero>(ctxInput);
+    
+    // 4) Wrap the native queue handle + device:
+    using queue_input_t = sycl::backend_input_t<
+      sycl::backend::ext_oneapi_level_zero, sycl::queue>;
+    queue_input_t qInput{
+      st.queue,  // ze_command_queue_handle_t
+      dev,       // the device it runs on
+      sycl::ext::oneapi::level_zero::ownership::keep,
+      /* property_list */ {}
+    };
+    
+    // 5) Create the SYCL queue:
+    sycl::queue queue =
+      sycl::make_queue<sycl::backend::ext_oneapi_level_zero>(qInput, ctx);
 
-        // 2. Create command list
-        ze_command_list_handle_t cmdlist = nullptr;
-        ze_command_list_desc_t listDesc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
-        ze_check(zeCommandListCreate(st.context, st.device, &listDesc, &cmdlist),
-                 "zeCommandListCreate");
+    // 6) Submit the kernel:
+    sycl::event ev = queue.submit([&](sycl::handler& cgh) {
+        launch(cgh, execution_range, reduction_ptrs);
+      });
 
-        // 3. Create events for profiling
-        ze_event_pool_handle_t evt_pool = nullptr;
-        ze_event_handle_t evt_start = nullptr, evt_end = nullptr;
-        
-        if(is_profiling_enabled()) {
-            ze_event_pool_desc_t poolDesc = {ZE_STRUCTURE_TYPE_EVENT_POOL_DESC};
-            poolDesc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE | ZE_EVENT_POOL_FLAG_KERNEL_TIMESTAMP;
-            poolDesc.count = 2;
-            ze_check(zeEventPoolCreate(st.context, &poolDesc, 1, &st.device, &evt_pool),
-                     "zeEventPoolCreate");
-            
-            ze_event_desc_t evtDesc = {ZE_STRUCTURE_TYPE_EVENT_DESC};
-            evtDesc.index = 0;
-            evtDesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
-            ze_check(zeEventCreate(evt_pool, &evtDesc, &evt_start), "zeEventCreate (start)");
-            
-            evtDesc.index = 1;
-            ze_check(zeEventCreate(evt_pool, &evtDesc, &evt_end), "zeEventCreate (end)");
-        }
-
-        // 4. Load kernel module (SPIR-V)
-        const auto& kernel_binary = launch.get_kernel_binary();
-        ze_module_handle_t module = nullptr;
-        ze_module_desc_t module_desc = {
-            ZE_STRUCTURE_TYPE_MODULE_DESC,
-            nullptr,
-            ZE_MODULE_FORMAT_IL_SPIRV,
-            kernel_binary.size(),
-            kernel_binary.data(),
-            "-vc-codegen -no-optimize", // Intel-specific flags
-            nullptr
-        };
-        ze_check(zeModuleCreate(st.context, st.device, &module_desc, &module, nullptr),
-                 "zeModuleCreate");
-
-        // 5. Create kernel
-        ze_kernel_handle_t kernel = nullptr;
-        ze_kernel_desc_t kernel_desc = {ZE_STRUCTURE_TYPE_KERNEL_DESC};
-        kernel_desc.pKernelName = launch.kernel_name().c_str();
-        ze_check(zeKernelCreate(module, &kernel_desc, &kernel), "zeKernelCreate");
-
-        // 6. Set kernel arguments
-        uint32_t arg_idx = 0;
-        for(void* p : ptrs) {
-            ze_check(zeKernelSetArgumentValue(kernel, arg_idx++, sizeof(p), &p),
-                     "zeKernelSetArgumentValue");
-        }
-        for(void* rptr : reduction_ptrs) {
-            ze_check(zeKernelSetArgumentValue(kernel, arg_idx++, sizeof(rptr), &rptr),
-                     "zeKernelSetArgumentValue (reduction)");
-        }
-
-        // 7. Configure kernel launch
-        const auto range = execution_range.get_range();
-        ze_group_count_t launch_args = {
-            static_cast<uint32_t>(range[0]),
-            static_cast<uint32_t>(range[1]),
-            static_cast<uint32_t>(range[2])
-        };
-        
-        // Set group size - use device max for Intel ARC
-        uint32_t groupSizeX = std::min(static_cast<uint32_t>(range[0]), static_cast<uint32_t>(m_system.max_work_group_size));
-        ze_check(zeKernelSetGroupSize(kernel, groupSizeX, 1, 1), "zeKernelSetGroupSize");
-
-        // 8. Append kernel to command list
-        if(is_profiling_enabled()) {
-            ze_check(zeCommandListAppendLaunchKernel(cmdlist, kernel, &launch_args, 
-                                                     evt_start, 0, nullptr),
-                     "zeCommandListAppendLaunchKernel (profiling)");
-        } else {
-            ze_check(zeCommandListAppendLaunchKernel(cmdlist, kernel, &launch_args, 
-                                                     nullptr, 0, nullptr),
-                     "zeCommandListAppendLaunchKernel");
-        }
-
-        // 9. Signal end event if profiling
-        if(is_profiling_enabled()) {
-            ze_check(zeCommandListAppendSignalEvent(cmdlist, evt_end), 
-                     "zeCommandListAppendSignalEvent");
-        }
-
-        // 10. Close and execute command list
-        ze_check(zeCommandListClose(cmdlist), "zeCommandListClose");
-        ze_check(zeCommandQueueExecuteCommandLists(st.queue, 1, &cmdlist, nullptr),
-                 "zeCommandQueueExecuteCommandLists");
-
-        // 11. Cleanup resources
-        zeCommandListDestroy(cmdlist);
-        zeKernelDestroy(kernel);
-        zeModuleDestroy(module);
-
-        // 12. Return async event
-        if(is_profiling_enabled()) {
-            return make_event_from_ze(evt_start, evt_end, evt_pool);
-        }
-        return make_complete_event();
-    });
+    // 7) Extract the native L0 event and wrap it:
+    ze_event_handle_t ze_ev =
+        sycl::get_native<sycl::backend::ext_oneapi_level_zero>(ev);
+      return make_event_from_ze(ze_ev, nullptr, false);
+  });
 }
 
 //------------------------------------------------------------------------------
@@ -426,26 +365,28 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
             0, 0, 0,
             static_cast<uint32_t>(sr[0]),
             static_cast<uint32_t>(sr[1]),
-            static_cast<uint32_t>(sr[2]),
-            static_cast<uint32_t>(s[0] * elem_size),
-            static_cast<uint32_t>(s[1] * s[0] * elem_size)
+            static_cast<uint32_t>(sr[2])
         };
 
         ze_copy_region_t dst_region = {
-            0, 0, 0,                      // originX, originY, originZ
-            sr[0], sr[1], sr[2],           // width, height, depth
-            d[0] * elem_size,              // rowPitch in bytes
-            d[1] * d[0] * elem_size        // slicePitch in bytes
+            0, 0, 0,
+            static_cast<uint32_t>(sr[0]),
+            static_cast<uint32_t>(sr[1]),
+            static_cast<uint32_t>(sr[2])
         };
 
         // 4. Append 3D memory copy
-        ze_check(zeCommandListAppendMemoryCopyRegion(cmdlist, 
+        zeCommandListAppendMemoryCopyRegion(
+            cmdlist, 
             dest, &dst_region, 
-            d[0] * elem_size, d[1] * d[0] * elem_size,
+            static_cast<uint32_t>(d[0] * elem_size),  // dstPitch
+            static_cast<uint32_t>(d[1] * d[0] * elem_size),  // dstSlicePitch
             source, &src_region,
-            s[0] * elem_size, s[1] * s[0] * elem_size,
-            (is_profiling_enabled() ? evt : nullptr), 0, nullptr),
-            "zeCommandListAppendMemoryCopyRegion");
+            static_cast<uint32_t>(s[0] * elem_size),  // srcPitch
+            static_cast<uint32_t>(s[1] * s[0] * elem_size),  // srcSlicePitch
+            (is_profiling_enabled() ? evt : nullptr), 
+            0, nullptr
+        );
 
         // 5. Close and execute command list
         ze_check(zeCommandListClose(cmdlist), "zeCommandListClose");
@@ -488,13 +429,17 @@ public:
         : m_event(evt), m_pool(pool), m_owns_pool(owns_pool) {}
 
     ~ze_event_impl() override {
-        if(m_event) zeEventDestroy(m_event);
+        if(m_event) {
+            // Ensure event is complete before destroying
+            zeEventHostSynchronize(m_event, UINT64_MAX);
+            zeEventDestroy(m_event);
+        }
         if(m_owns_pool && m_pool) zeEventPoolDestroy(m_pool);
     }
 
     bool is_complete() override {
-        if(!m_event) return true;
-        return zeEventQueryStatus(m_event) == ZE_RESULT_SUCCESS;
+        ze_result_t status = zeEventQueryStatus(m_event);
+        return status == ZE_RESULT_SUCCESS;
     }
 
 private:
@@ -505,7 +450,7 @@ private:
 
 // Create async_event from Level-Zero event
 async_event make_event_from_ze(ze_event_handle_t evt, ze_event_pool_handle_t pool, bool owns_pool) {
-    return make_async_event<ze_event_impl>(evt, pool, owns_pool);
+  return make_async_event<ze_event_impl>(evt, pool, owns_pool);
 }
 
 // Create async_event with start and end events for profiling
@@ -528,16 +473,13 @@ bool celerity::detail::oneapi_backend::is_profiling_enabled() const {
     return m_config.profiling;
 }
 
-async_event oneapi_backend::enqueue_work(device_id did, size_t lane, 
-    std::function<async_event(device_state&)> work) {
-    
-    device_state& st = m_devices[did];
-    if(st.submit_thread) {
-        auto promise = std::make_shared<std::promise<async_event>>();
-        auto future = promise->get_future();
-        
-        return future.get();
+async_event oneapi_backend::enqueue_work(device_id did, size_t lane,
+                                         std::function<async_event(device_state&)> work) {
+    // 1) Validate the device_id against our dense_map
+    if(did >= m_devices.size() || !m_devices[did].device) {
+        throw std::runtime_error("enqueue_work: invalid device_id");
     }
+    device_state& st = m_devices[did];
     return work(st);
 }
 
