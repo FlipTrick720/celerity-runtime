@@ -13,7 +13,7 @@
 #include <sycl/ext/oneapi/backend/level_zero.hpp>
 #include <sycl/sycl.hpp>
 #include <sycl/backend.hpp>
-
+ 
 namespace celerity::detail {
 
 class ze_event_impl;
