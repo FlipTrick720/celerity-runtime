@@ -13,7 +13,9 @@
 #include <sycl/ext/oneapi/backend/level_zero.hpp>
 #include <sycl/sycl.hpp>
 #include <sycl/backend.hpp>
- 
+#include "log.h"
+#include <spdlog/spdlog.h>
+
 namespace celerity::detail {
 
 class ze_event_impl;
@@ -44,6 +46,8 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
 
     // Initialize Level Zero
     ze_check(zeInit(ZE_INIT_FLAG_GPU_ONLY), "zeInit");
+
+    spdlog::info("oneAPI backend: initializing Level-Zero for {} device(s).", devices.size());
 
     // (1) Find a Level-Zero driver that covers the given devices
     uint32_t driverCount = 0;
@@ -77,10 +81,14 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
     }
     if(!m_driver) throw std::runtime_error("No driver supports all devices");
 
+    spdlog::info("oneAPI backend: selected Level-Zero driver handle {}", (void*)m_driver);
+
     // (2) Create context
     ze_context_desc_t contextDesc = {ZE_STRUCTURE_TYPE_CONTEXT_DESC, nullptr, 0};
     ze_check(zeContextCreate(m_driver, &contextDesc, &m_context), "zeContextCreate");
-    
+
+    spdlog::info("oneAPI backend: created Level-Zero context {}", (void*)m_context);
+
     // (3) Initialize devices
     size_t max_id = 0;
     for(const auto& dev : devices) {
@@ -137,6 +145,7 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
     
     // (5) Initialize host state
     m_host = host_state(m_context, m_config.profiling);
+    spdlog::info("Celerity backend ACTIVE: oneAPI specialization (Level-Zero). Devices initialized: {}. Max WG size: {}.", m_system.num_devices, m_system.max_work_group_size);
 }
 
 oneapi_backend::~oneapi_backend() {
@@ -248,8 +257,8 @@ async_event oneapi_backend::enqueue_device_kernel(device_id did, size_t lane,
     const std::vector<void*>& reduction_ptrs) {
 
   return enqueue_work(did, lane,
-    [this, launch, infos = std::move(infos), execution_range, reduction_ptrs](device_state& st) -> async_event {
-
+    [this, launch, infos = std::move(infos), execution_range, reduction_ptrs, lane](device_state& st) -> async_event {
+    spdlog::info("oneAPI backend: submitting device kernel to L0 queue on did={} (lane={}).", (size_t)reinterpret_cast<uintptr_t>(st.device), lane);
     // 1) Build a sycl::device from the native handle:
     sycl::device dev =
       sycl::make_device<sycl::backend::ext_oneapi_level_zero>(st.device);
