@@ -31,8 +31,8 @@ static void ze_check(ze_result_t result, const char* message) {
 }
 
 std::unique_ptr<backend> make_oneapi_backend(const std::vector<ze_device_handle_t>& devices,
-                    const oneapi_backend::configuration& lvl0_cfg) {
-  return std::make_unique<oneapi_backend>(devices, lvl0_cfg);
+                    const oneapi_backend::configuration& cfg) {
+  return std::make_unique<oneapi_backend>(devices, cfg);
 }
 
 //------------------------------------------------------------------------------
@@ -47,6 +47,7 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
     // Initialize Level Zero
     ze_check(zeInit(ZE_INIT_FLAG_GPU_ONLY), "zeInit");
 
+    spdlog::info("Celerity backend ACTIVE: oneAPI/Level-Zero specialization.");
     spdlog::info("oneAPI backend: initializing Level-Zero for {} device(s).", devices.size());
 
     // (1) Find a Level-Zero driver that covers the given devices

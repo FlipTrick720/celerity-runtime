@@ -19,6 +19,8 @@ cmake .. -G Ninja \
   -DCELERITY_SYCL_IMPL=DPC++ \
   -DCMAKE_PREFIX_PATH=/opt/intel/oneapi/compiler/latest/ \
   -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/latest/bin/icpx \
+  -DMPI_C_COMPILER=/usr/bin/mpicc \
+  -DMPI_CXX_COMPILER=/usr/bin/mpicxx \
   2>&1 | tee -a "$LOGFILE"
 
 echo "🚀 Building with Ninja..." | tee -a "$LOGFILE"

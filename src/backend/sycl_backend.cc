@@ -33,6 +33,10 @@
 #include <fmt/ranges.h>
 #include <sycl/sycl.hpp>
 
+#if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
+  #include "backend/oneapi_backend.h"
+#endif
+
 
 namespace celerity::detail::sycl_backend_detail {
 
@@ -333,6 +337,11 @@ std::vector<sycl_backend_type> sycl_backend_enumerator::compatible_backends(cons
 #elif CELERITY_WORKAROUND(DPCPP)
 	if(device.get_backend() == sycl::backend::ext_oneapi_cuda) { backends.push_back(sycl_backend_type::cuda); }
 #endif
+#if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
+   if(device.get_backend() == sycl::backend::ext_oneapi_level_zero) {
+       backends.push_back(sycl_backend_type::level_zero);
+   }
+#endif
 	assert(std::is_sorted(backends.begin(), backends.end()));
 	return backends;
 }
@@ -342,6 +351,9 @@ std::vector<sycl_backend_type> sycl_backend_enumerator::available_backends() con
 #if CELERITY_DETAIL_BACKEND_CUDA_ENABLED
 	backends.push_back(sycl_backend_type::cuda);
 #endif
+#if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
+   backends.push_back(sycl_backend_type::level_zero);
+#endif
 	assert(std::is_sorted(backends.begin(), backends.end()));
 	return backends;
 }
@@ -350,6 +362,7 @@ bool sycl_backend_enumerator::is_specialized(backend_type type) const {
 	switch(type) {
 	case backend_type::generic: return false;
 	case backend_type::cuda: return true;
+	case backend_type::level_zero: return true;
 	default: utils::unreachable(); // LCOV_EXCL_LINE
 	}
 }
@@ -358,6 +371,7 @@ int sycl_backend_enumerator::get_priority(backend_type type) const {
 	switch(type) {
 	case backend_type::generic: return 0;
 	case backend_type::cuda: return 1;
+	case backend_type::level_zero: return 2;
 	default: utils::unreachable(); // LCOV_EXCL_LINE
 	}
 }
@@ -379,6 +393,23 @@ std::unique_ptr<backend> make_sycl_backend(const sycl_backend_type type, const s
 		return std::make_unique<sycl_cuda_backend>(devices, config);
 #else
 		utils::panic("CUDA backend has not been compiled");
+#endif
+case sycl_backend_type::level_zero:
+#if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
+{
+    std::vector<ze_device_handle_t> ze_devs;
+    ze_devs.reserve(devices.size());
+    for (const auto& d : devices) {
+        ze_devs.push_back(sycl::get_native<sycl::backend::ext_oneapi_level_zero>(d));
+    }
+    oneapi_backend::configuration l0_cfg{
+        .profiling = config.profiling,
+		.per_device_submission_threads = config.per_device_submission_threads
+    };
+    return make_oneapi_backend(ze_devs, l0_cfg);
+}
+#else
+    utils::panic("Level-Zero backend has not been compiled");
 #endif
 	}
 	utils::unreachable(); // LCOV_EXCL_LINE

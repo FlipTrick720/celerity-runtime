@@ -2,7 +2,6 @@
 #pragma once
 
 #include "backend/backend.h"
-#include "backend/sycl_backend.h"
 #include "async_event.h"
 #include "system_info.h"
 #include "thread_queue.h"
@@ -20,7 +19,7 @@ class oneapi_backend final : public backend {
 public:
   struct configuration {
     bool profiling = false;
-    bool per_device_submission_threads = false;
+    bool per_device_submission_threads = true;
   };
 
   oneapi_backend(const std::vector<ze_device_handle_t>& devices, const configuration& config);
@@ -147,16 +146,6 @@ void* allocate_host_memory(size_t size, size_t alignment);
 std::unique_ptr<backend>
 make_oneapi_backend(const std::vector<ze_device_handle_t>& devices,
                     const oneapi_backend::configuration& lvl0_cfg);
-
-inline std::unique_ptr<backend>
-make_oneapi_backend(const std::vector<ze_device_handle_t>& devices,
-                    const sycl_backend::configuration& sycl_cfg) {
-  oneapi_backend::configuration lvl0_cfg;
-  lvl0_cfg.profiling                   = sycl_cfg.profiling;
-  lvl0_cfg.per_device_submission_threads = sycl_cfg.per_device_submission_threads;
-  // this call picks the *real* overload, not itself
-  return make_oneapi_backend(devices, lvl0_cfg);
-}
 
 
 } // namespace celerity::detail

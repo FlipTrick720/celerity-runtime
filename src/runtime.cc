@@ -69,9 +69,19 @@
 #include "local_communicator.h"
 #endif
 
+#include "backend/oneapi_backend.h"
+#include "backend/sycl_backend.h"
 
 namespace celerity {
 namespace detail {
+
+auto be = celerity::detail::make_oneapi_backend(
+    ze_devices,
+    celerity::detail::oneapi_backend::configuration{
+        .profiling = sycl_cfg.profiling,
+        .per_device_submission_threads = sycl_cfg.per_device_submission_threads
+    }
+);
 
 	class epoch_promise final : public task_promise {
 	  public:
@@ -256,7 +266,7 @@ namespace detail {
 		// TODO: Assert that shared memory is available (i.e. not explicitly disabled)
 #define SPLIT_TYPE MPI_COMM_TYPE_SHARED
 #endif
-		MPI_Comm host_comm = nullptr;
+		MPI_Comm host_comm = MPI_COMM_NULL;
 		MPI_Comm_split_type(MPI_COMM_WORLD, SPLIT_TYPE, 0, MPI_INFO_NULL, &host_comm);
 
 		int local_rank = 0;

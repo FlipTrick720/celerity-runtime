@@ -13,7 +13,7 @@ thread_type task_type_device_submitter(const uint32_t n) {
 	assert(n < thread_type_step);
 	return thread_type(static_cast<uint32_t>(thread_type::first_device_submitter) + n); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
 }
-thread_type task_type_host_queue(const uint32_t n) {
+thread_type td::unique_ptr<backend> make_oneapi_backend(const std::vector<ze_device_handle_t>& task_type_host_queue(const uint32_t n) {
 	assert(n < thread_type_step);
 	return thread_type(static_cast<uint32_t>(thread_type::first_host_queue) + n); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
 }
