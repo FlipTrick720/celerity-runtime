@@ -12,6 +12,8 @@
 #include <vector>
 #include <optional>
 #include <atomic>
+#include <memory>
+#include <spdlog/spdlog.h>
 
 namespace celerity::detail {
 
@@ -77,39 +79,40 @@ public:
 
 private:
 struct device_state {
-    ze_context_handle_t        context = nullptr;
-    ze_device_handle_t         device = nullptr;
-    ze_command_queue_handle_t  queue = nullptr;
-    std::atomic_flag           error_check_in_flight = ATOMIC_FLAG_INIT;
+    ze_device_handle_t          device{};
+    ze_context_handle_t         context{};
+    ze_command_queue_handle_t   queue{};
+
+    sycl::device                sycl_dev;
+    sycl::context               sycl_ctx{ sycl::property_list{} }; // Inline init to avoid explicit ctor issues
+    std::vector<std::unique_ptr<sycl::queue>> sycl_lanes;
     std::optional<thread_queue> submit_thread;
 
-    device_state() = default;
-    device_state(const device_state&) = delete;
-    device_state& operator=(const device_state&) = delete;
-    
-    // Custom move constructor to handle atomic_flag
-    device_state(device_state&& other) noexcept 
-        : context(other.context)
-        , device(other.device)
-        , queue(other.queue)
-        , submit_thread(std::move(other.submit_thread)) {
-        other.context = nullptr;
-        other.device = nullptr;
-        other.queue = nullptr;
-    }
-
-    // Custom move assignment operator
-    device_state& operator=(device_state&& other) noexcept {
-        if (this != &other) {
-            context = other.context;
-            device = other.device;
-            queue = other.queue;
-            submit_thread = std::move(other.submit_thread);
-            other.context = nullptr;
-            other.device = nullptr;
-            other.queue = nullptr;
+    sycl::queue& sycl_queue_for_lane(size_t lane, bool profiling) {
+        while (sycl_lanes.size() <= lane) {
+            auto props = profiling
+              ? sycl::property_list{ sycl::property::queue::in_order{}, sycl::property::queue::enable_profiling{} }
+              : sycl::property_list{ sycl::property::queue::in_order{} };
+        
+            // Async handler that logs errors from device tasks
+            auto ah = [](sycl::exception_list elist) {
+                for (const auto& e : elist) {
+                    try {
+                        std::rethrow_exception(e);
+                    } catch (const sycl::exception& se) {
+                        spdlog::error("SYCL async exception: {}", se.what());
+                        // If you need more detail:
+                        // spdlog::error("SYCL error code: {}", static_cast<int>(se.code().value()));
+                    } catch (...) {
+                        spdlog::error("SYCL async exception: <non-SYCL exception>");
+                    }
+                }
+                // Do NOT call std::terminate() here; keep running so we can see logs.
+            };
+          
+            sycl_lanes.emplace_back(std::make_unique<sycl::queue>(sycl_ctx, sycl_dev, ah, props));
         }
-        return *this;
+        return *sycl_lanes[lane];
     }
 };
 
@@ -119,20 +122,17 @@ void* allocate_host_memory(size_t size, size_t alignment);
 
   struct host_state {
     ze_context_handle_t    context;
+    bool                   profiling;
     thread_queue           alloc_queue;
     std::vector<thread_queue> host_queues;
     host_state(ze_context_handle_t ctx, bool profiling);
     thread_queue& get_queue(size_t lane);
   };
 
-  system_info                                  m_system;
+  std::unique_ptr<host_state>                  m_host;
   dense_map<device_id, device_state>           m_devices;
-  host_state                                   m_host;
+  system_info                                  m_system;
   configuration                                m_config;
-
-  // helper: record L0 event + wrap it in an async_event
-  async_event record_and_wrap(ze_event_handle_t evt_before,
-                              ze_event_handle_t evt_after);
 
   // enqueue arbitrary device work, possibly via submit threads
   async_event enqueue_work(device_id did,
@@ -142,6 +142,10 @@ void* allocate_host_memory(size_t size, size_t alignment);
   ze_driver_handle_t  m_driver   = nullptr;
   ze_context_handle_t m_context  = nullptr;
 };
+
+// Helper functions for event management
+async_event make_event_from_native_sycl(ze_event_handle_t evt);
+async_event make_event_from_ze_owned(ze_event_handle_t evt, ze_event_pool_handle_t pool);
 
 std::unique_ptr<backend>
 make_oneapi_backend(const std::vector<ze_device_handle_t>& devices,
