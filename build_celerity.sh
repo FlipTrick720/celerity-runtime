@@ -15,7 +15,7 @@ cd "$BUILD_DIR"
 
 echo "🔧 Running CMake..." | tee -a "$LOGFILE"
 cmake .. -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_BUILD_TYPE=Debug \
   -DCELERITY_SYCL_IMPL=DPC++ \
   -DCMAKE_PREFIX_PATH=/opt/intel/oneapi/compiler/latest/ \
   -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/latest/bin/icpx \
@@ -25,6 +25,7 @@ cmake .. -G Ninja \
   -DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE \
   -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O1 -g -fno-omit-frame-pointer" \
   -DCMAKE_EXE_LINKER_FLAGS="-rdynamic"
+  -DCMAKE_CXX_FLAGS="-fno-omit-frame-pointer" \
   2>&1 | tee -a "$LOGFILE"
 
 echo "🚀 Building with Ninja..." | tee -a "$LOGFILE"
