@@ -3,6 +3,7 @@ compile_commands.json
 build
 build_*
 build-*
+!build_celerity.sh
 install
 .cache/
 .vs/
