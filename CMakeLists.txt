@@ -1,3 +1,4 @@
+# celerity-runtime/CMakeLists.txt
 cmake_minimum_required(VERSION 3.13)
 
 if (CMAKE_CURRENT_BINARY_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -94,7 +95,7 @@ else()
   endif()
 endif()
 
-set(CELERITY_DPCPP_TARGETS "spir64" CACHE STRING "Intel DPC++ targets")
+set(CELERITY_DPCPP_TARGETS "spir64_gen" CACHE STRING "Intel DPC++ targets")
 if(CELERITY_SYCL_IMPL STREQUAL "DPC++")
   message(STATUS "DPC++ will target ${CELERITY_DPCPP_TARGETS}")
 endif()
@@ -415,6 +416,35 @@ endif()
 target_compile_options(celerity_runtime PUBLIC "${CELERITY_CXX_FLAGS}")
 target_link_options(celerity_runtime PUBLIC "${CELERITY_LINK_FLAGS}")
 
+# --- Intel GPU backend flags (must come before add_subdirectory(examples/test)) ---
+if(CELERITY_SYCL_IMPL STREQUAL "DPC++")
+  set(CELERITY_INTEL_TARGET_BACKEND spir64_gen CACHE STRING "SYCL target backend")
+  set(CELERITY_INTEL_DEVICE         dg2        CACHE STRING "ocloc -device value")
+
+  # Keep "-device dg2" as a single argument
+  set(_SYCL_BACKEND_ARGS
+      -Xsycl-target-backend=${CELERITY_INTEL_TARGET_BACKEND}
+      "-device ${CELERITY_INTEL_DEVICE}"
+  )
+
+  # Apply in this directory and below
+  add_compile_options(${_SYCL_BACKEND_ARGS})
+  add_link_options(${_SYCL_BACKEND_ARGS})
+
+  # Propagate via the runtime target to dependents (examples/tests)
+  target_compile_options(celerity_runtime PUBLIC ${_SYCL_BACKEND_ARGS})
+  target_link_options(celerity_runtime PUBLIC ${_SYCL_BACKEND_ARGS})
+
+  # (Optional belt & suspenders) also set the classic linker flags
+  foreach(kind EXE SHARED MODULE)
+    set(CMAKE_${kind}_LINKER_FLAGS
+        "${CMAKE_${kind}_LINKER_FLAGS} -Xsycl-target-backend=${CELERITY_INTEL_TARGET_BACKEND} \"-device ${CELERITY_INTEL_DEVICE}\""
+        CACHE STRING "" FORCE)
+  endforeach()
+
+  message(STATUS "Added Intel Arc GPU target flags for DPC++: -Xsycl-target-backend=${CELERITY_INTEL_TARGET_BACKEND} \"-device ${CELERITY_INTEL_DEVICE}\"")
+endif()
+
 # Examples
 
 option(CELERITY_BUILD_EXAMPLES "Build various example applications" ON)
@@ -474,11 +504,3 @@ install(FILES
   "${PROJECT_SOURCE_DIR}/cmake/AddToTarget.cmake"
   DESTINATION lib/cmake/Celerity
 )
-
-if(CELERITY_SYCL_IMPL STREQUAL "DPC++")
-  install(FILES
-    "${PROJECT_SOURCE_DIR}/cmake/TestDPCXX.cmake"
-    "${PROJECT_SOURCE_DIR}/cmake/sycl_test.cpp"
-    DESTINATION lib/cmake/Celerity
-  )
-endif()

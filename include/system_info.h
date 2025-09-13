@@ -50,6 +50,12 @@ struct memory_info {
 struct system_info {
 	dense_map<device_id, device_info> devices;
 	dense_map<memory_id, memory_info> memories;
+
+	int num_devices = 0;
+    size_t max_work_group_size = 0;
+    size_t max_compute_units = 0;
+    int total_global_memory = 0;
+    size_t host_page_size = 4096;
 };
 
 } // namespace celerity::detail

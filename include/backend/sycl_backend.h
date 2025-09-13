@@ -1,7 +1,8 @@
 #pragma once
 
-#include "async_event.h"
 #include "backend/backend.h"
+#include "system_info.h"
+#include "async_event.h"
 #include "cgf.h"
 #include "closure_hydrator.h"
 #include "grid.h"
@@ -19,6 +20,10 @@
 #include <vector>
 
 #include <sycl/sycl.hpp>
+
+#if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
+  #include <sycl/ext/oneapi/backend/level_zero.hpp>     // get_native<...level_zero>
+#endif
 
 
 namespace celerity::detail::sycl_backend_detail {
@@ -155,7 +160,7 @@ class sycl_cuda_backend final : public sycl_backend {
 #endif
 
 /// We differentiate between non-specialized and specialized Celerity SYCL backends.
-enum class sycl_backend_type { generic, cuda };
+enum class sycl_backend_type { generic, cuda, level_zero };
 
 /// Enumerates the SYCL backends devices are compatible with and that Celerity has been compiled with.
 /// This type implements the (nameless) concept accepted by `select_devices`.
