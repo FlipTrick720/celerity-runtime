@@ -2,7 +2,7 @@
 
 set -e  # Stop on first error
 
-BASE_DIR="/home/malte.braig/testApproach/celerity-runtime"
+BASE_DIR="/home/malte.braig/celerity-runtime"
 mkdir -p "$BASE_DIR"
 
 TIMESTAMP=$(date -u +%Y-%m-%d_%H-%M-%S)

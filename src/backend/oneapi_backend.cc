@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// oneapi_backend.cc — always-on logging & safer resource usage (blocking copies when not profiling)
+// oneapi_backend.cc
 
 #include "backend/oneapi_backend.h"
 #include "backend/sycl_backend.h"
@@ -39,7 +38,7 @@ struct _force_trace_log {
 } _force_trace_log_instance;
 } // namespace
 
-// --- tiny logging helper -----------------------------------------------------
+// --- tiny logging helper (at start of each function) -----------------------------------------------------
 #define OAPI_LOG_ENTER() ::spdlog::debug("oneAPI backend: {}()", __func__)
 
 // Forward decls
@@ -75,7 +74,7 @@ sycl::queue& oneapi_backend::device_state::sycl_queue_for_lane(size_t lane, bool
           sycl::ext::oneapi::property::queue::discard_events{}
         };
 
-    // Robust async handler (logs, never throws silently).
+    // Async handler (logs, never throws silently).
     auto ah = sycl::async_handler{[](sycl::exception_list el){
       for (auto& e : el) {
         try {
@@ -105,23 +104,7 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
   spdlog::debug("oneAPI backend: calling zeInit()");
   ze_check(zeInit(ZE_INIT_FLAG_GPU_ONLY), "zeInit");
 
-  // Probe & log SYCL backend to catch misconfiguration early.
-  try {
-    auto sycl_devs = sycl::device::get_devices(sycl::info::device_type::gpu);
-    for (const auto& d : sycl_devs) {
-      auto be = d.get_backend();
-      const char* be_name =
-        (be == sycl::backend::ext_oneapi_level_zero) ? "level_zero" :
-        (be == sycl::backend::opencl)               ? "opencl"      :
-        (be == sycl::backend::host)                 ? "host"        : "other";
-      spdlog::info("oneAPI backend: SYCL sees device '{}' from backend '{}'",
-                   d.get_info<sycl::info::device::name>(), be_name);
-    }
-  } catch (...) {
-    spdlog::warn("oneAPI backend: could not enumerate SYCL devices for logging (non-fatal).");
-  }
-
-  // Pick driver that covers all requested devices
+  // Look for Driver that covers all devices
   uint32_t driver_count = 0;
   ze_check(zeDriverGet(&driver_count, nullptr), "zeDriverGet(count)");
   std::vector<ze_driver_handle_t> drivers(driver_count);
@@ -169,12 +152,14 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
 
     uint32_t compute_ordinal = UINT32_MAX;
     for (uint32_t gi = 0; gi < group_count; ++gi) {
+      // erste COMPUTE-fähige Gruppe wählen
       if ((groups[gi].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE) && groups[gi].numQueues > 0) {
         compute_ordinal = gi; break;
       }
     }
     if (compute_ordinal == UINT32_MAX) throw std::runtime_error("No compute queue group found");
 
+    // Queue  anlegen
     ze_command_queue_desc_t qdesc{};
     qdesc.stype    = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
     qdesc.ordinal  = compute_ordinal;
@@ -186,7 +171,7 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
     spdlog::debug("oneAPI backend: created L0 queue {} (ordinal={}) on device {}",
                   static_cast<void*>(st.queue), st.queue_ordinal, static_cast<void*>(st.device));
 
-    // SYCL interop: device + context from native L0 handles
+    // SYCL Sicht für: device + context from native L0 handles
     st.sycl_dev = sycl::make_device<sycl::backend::ext_oneapi_level_zero>(st.device);
 
     using ctx_in_t =
@@ -196,14 +181,14 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
                      sycl::ext::oneapi::level_zero::ownership::keep };
     st.sycl_ctx = sycl::make_context<sycl::backend::ext_oneapi_level_zero>(ctx_in);
 
-    // Optional per-device submitter
+    // Optional per-device submitter (not sure)
     if (m_config.per_device_submission_threads) {
       spdlog::debug("oneAPI backend: enabling submit thread for device index {}", i);
       st.submit_thread.emplace(named_threads::task_type_device_submitter(i));
     }
   }
 
-  // Minimal system_info that Celerity expects
+  // Minimal system_info for Celerity needs
   m_system.num_devices = devices.size();
   m_system.devices.resize(devices.size());
   m_system.max_work_group_size = 0;
@@ -236,30 +221,30 @@ oneapi_backend::oneapi_backend(const std::vector<ze_device_handle_t>& devices,
 oneapi_backend::~oneapi_backend() {
   OAPI_LOG_ENTER();
   for (auto& st : m_devices) {
-    st.submit_thread.reset();
+    st.submit_thread.reset(); // Threads beenden
     if (st.queue) {
-      zeCommandQueueSynchronize(st.queue, UINT64_MAX);
-      zeCommandQueueDestroy(st.queue);
+      zeCommandQueueSynchronize(st.queue, UINT64_MAX); // warten
+      zeCommandQueueDestroy(st.queue); // wenn fertig -> destroy
     }
   }
   m_host.reset();
-  if (m_context) zeContextDestroy(m_context);
+  if (m_context) zeContextDestroy(m_context); // Context frei geben
 }
 
 // ----------------------------------------------------------------------------
-// system info
+// system info (Api)
 // ----------------------------------------------------------------------------
-const system_info& oneapi_backend::get_system_info() const { OAPI_LOG_ENTER(); return m_system; }
-system_info&       oneapi_backend::get_system_info()       { OAPI_LOG_ENTER(); return m_system; }
+const system_info& oneapi_backend::get_system_info() const { OAPI_LOG_ENTER(); return m_system; } // read-only
+system_info&       oneapi_backend::get_system_info()       { OAPI_LOG_ENTER(); return m_system; } // read and write
 
 // ----------------------------------------------------------------------------
-// init (sanity)
+// init (to see if all are runnig or idel)
 // ----------------------------------------------------------------------------
 void oneapi_backend::init() {
   OAPI_LOG_ENTER();
   for (auto& st : m_devices) {
-    ze_result_t r = zeCommandQueueSynchronize(st.queue, 0);
-    if (r != ZE_RESULT_SUCCESS && r != ZE_RESULT_NOT_READY) {
+    ze_result_t r = zeCommandQueueSynchronize(st.queue, 0); // mit L0 testen
+    if (r != ZE_RESULT_SUCCESS && r != ZE_RESULT_NOT_READY) { // alles andere -> error
       throw std::runtime_error("Level-Zero queue sync failed in init()");
     }
   }
@@ -295,6 +280,15 @@ async_event oneapi_backend::enqueue_host_alloc(size_t size, size_t alignment) {
   });
 }
 
+async_event oneapi_backend::enqueue_host_free(void* ptr) {
+  OAPI_LOG_ENTER();
+  return m_host->alloc_queue.submit([this, ptr]() -> void* {
+    spdlog::debug("oneAPI backend: host_free(ptr={})", ptr);
+    if (ptr) ze_check(zeMemFree(m_context, ptr), "zeMemFree(host_free)");
+    return nullptr;
+  });
+}
+
 async_event oneapi_backend::enqueue_device_alloc(device_id did, size_t size, size_t alignment) {
   OAPI_LOG_ENTER();
   return enqueue_work(did, 0, [this, size, alignment, did](device_state& st) -> async_event {
@@ -303,15 +297,6 @@ async_event oneapi_backend::enqueue_device_alloc(device_id did, size_t size, siz
     void* p = nullptr;
     ze_check(zeMemAllocDevice(st.context, &dev_desc, size, alignment, st.device, &p), "zeMemAllocDevice");
     return make_complete_event(p);
-  });
-}
-
-async_event oneapi_backend::enqueue_host_free(void* ptr) {
-  OAPI_LOG_ENTER();
-  return m_host->alloc_queue.submit([this, ptr]() -> void* {
-    spdlog::debug("oneAPI backend: host_free(ptr={})", ptr);
-    if (ptr) ze_check(zeMemFree(m_context, ptr), "zeMemFree(host_free)");
-    return nullptr;
   });
 }
 
@@ -327,7 +312,7 @@ async_event oneapi_backend::enqueue_device_free(device_id did, void* ptr) {
 // ----------------------------------------------------------------------------
 // tasks
 // ----------------------------------------------------------------------------
-async_event oneapi_backend::enqueue_host_task(
+async_event oneapi_backend::enqueue_host_task( // cpu thread
   size_t host_lane, const host_task_launcher& launcher,
   std::vector<closure_hydrator::accessor_info> accessor_infos,
   const range<3>& global_range, const box<3>& execution_range,
@@ -335,18 +320,19 @@ async_event oneapi_backend::enqueue_host_task(
 {
   OAPI_LOG_ENTER();
   auto& hydrator = closure_hydrator::get_instance();
-  hydrator.arm(target::host_task, std::move(accessor_infos));
-  auto launch_hydrated = hydrator.hydrate<target::host_task>(launcher);
+  hydrator.arm(target::host_task, std::move(accessor_infos)); // arm macht Buffer und Subrange
+  auto launch_hydrated = hydrator.hydrate<target::host_task>(launcher); // hydrate makes callable
 
-  thread_queue& q = m_host->get_queue(host_lane);
-  return q.submit([=, launch_hydrated = std::move(launch_hydrated)]() {
+  thread_queue& q = m_host->get_queue(host_lane); // Holt Host-Worker-Queue
+
+  return q.submit([=, launch_hydrated = std::move(launch_hydrated)]() { // gibt Arbeit asynchron an Host-Queue
     spdlog::debug("oneAPI backend: running host_task on lane {}", host_lane);
     launch_hydrated(global_range, execution_range, collective_comm);
     return nullptr;
   });
 }
 
-async_event oneapi_backend::enqueue_device_kernel(
+async_event oneapi_backend::enqueue_device_kernel( // gpu queue
   device_id did, size_t lane, const device_kernel_launcher& launch,
   std::vector<closure_hydrator::accessor_info> accessor_infos,
   const box<3>& execution_range, const std::vector<void*>& reduction_ptrs)
@@ -354,18 +340,18 @@ async_event oneapi_backend::enqueue_device_kernel(
   OAPI_LOG_ENTER();
   return enqueue_work(did, lane,
       [this, did, lane, launch, execution_range, reduction_ptrs,
-       acc_infos = std::move(accessor_infos)](device_state& st) mutable -> async_event {
+       acc_infos = std::move(accessor_infos)](device_state& st) mutable -> async_event { // auf device-State
     spdlog::debug("oneAPI backend: device_kernel(dev={}, lane={})", did.value, lane);
-    auto& q = st.sycl_queue_for_lane(lane, m_config.profiling);
+    auto& q = st.sycl_queue_for_lane(lane, m_config.profiling); // get queue
 
     sycl::event ev = q.submit([&, acc_infos = std::move(acc_infos)](sycl::handler& cgh) mutable {
       auto& hydrator = closure_hydrator::get_instance();
-      hydrator.arm(target::device, std::move(acc_infos));
+      hydrator.arm(target::device, std::move(acc_infos)); // arm macht Buffer und Subrange
       auto launch_h = hydrator.hydrate<target::device>(cgh, launch);
       launch_h(cgh, execution_range, reduction_ptrs);
     });
 
-    celerity::detail::sycl_backend_detail::flush(q);
+    celerity::detail::sycl_backend_detail::flush(q); // to get to nativ runtime
     using sy_ev = celerity::detail::sycl_backend_detail::sycl_event;
     return make_async_event<sy_ev>(std::move(ev), m_config.profiling);
   });
@@ -374,100 +360,106 @@ async_event oneapi_backend::enqueue_device_kernel(
 // ----------------------------------------------------------------------------
 // copies
 // ----------------------------------------------------------------------------
-async_event oneapi_backend::enqueue_host_copy(size_t host_lane,
+// for host to host on cpu with up to 3D line by line copy
+async_event oneapi_backend::enqueue_host_copy(size_t host_lane, // welcher Host-Thread-Lane
                                               const void* source,
                                               void* dest,
-                                              const region_layout& src_layout,
-                                              const region_layout& dst_layout,
-                                              const region<3>& copy_region,
+                                              const region_layout& src_layout, // orga of src_mem
+                                              const region_layout& dst_layout, // orga of dst_mem
+                                              const region<3>& copy_region, // offset und "size"
                                               size_t elem_size) {
   OAPI_LOG_ENTER();
-  thread_queue& tq = m_host->get_queue(host_lane);
-  return tq.submit([=]() -> void* {
+  thread_queue& tq = m_host->get_queue(host_lane); // get right queue
+  return tq.submit([=]() -> void* { // asynchron in queue
     spdlog::debug("oneAPI backend: host_copy(lane={}, bytes≈{})",
                   host_lane, copy_region.get_boxes()[0].get_area() * elem_size);
-    const auto box  = copy_region.get_boxes()[0];
-    const auto off  = box.get_min();
-    const auto ext  = box.get_range();
-    const auto s    = std::get<strided_layout>(src_layout).allocation.get_range();
-    const auto d    = std::get<strided_layout>(dst_layout).allocation.get_range();
+    const auto box  = copy_region.get_boxes()[0]; // extract info from box
+    const auto off  = box.get_min(); // Start-Koordinate
+    const auto ext  = box.get_range(); // Breite/Höhe/Tiefe = Spalten/Zeilen/Ebenen
+    const auto s    = std::get<strided_layout>(src_layout).allocation.get_range(); // in sx, sy, sz // sollte strided sein
+    const auto d    = std::get<strided_layout>(dst_layout).allocation.get_range(); // in dx, dy, dz
 
-    const auto src = static_cast<const char*>(source);
-    auto       dst = static_cast<char*>(dest);
-    const size_t sx = s[0], sy = s[1];
-    const size_t dx = d[0], dy = d[1];
+    const auto src = static_cast<const char*>(source); // Byte-Pointer cast
+    auto       dst = static_cast<char*>(dest); // Byte-Pointer cast
+    const size_t sx = s[0], sy = s[1]; // for Zeilenadressierung
+    const size_t dx = d[0], dy = d[1]; // for Zeilenadressierung
 
+    // Row-Major-Flattening => index = ((z * height) + y) * width + x
+    // size_t so shouldn't overflow
     for (size_t z = 0; z < ext[2]; ++z) {
       for (size_t y = 0; y < ext[1]; ++y) {
         size_t src_off = ((off[2]+z) * sy + (off[1]+y)) * sx + off[0];
         size_t dst_off = ((off[2]+z) * dy + (off[1]+y)) * dx + off[0];
-        std::memcpy(dst + dst_off*elem_size, src + src_off*elem_size, ext[0]*elem_size);
-      }
+        std::memcpy(dst + dst_off*elem_size, src + src_off*elem_size, ext[0]*elem_size); // (ext[0]*elem_size) macht Byte pro Zeile
+      } // Probleme wenn Overlap von src und dst
     }
     return nullptr;
   });
 }
 
-async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
-                                                const void* source, void* dest,
-                                                const region_layout& src_layout, const region_layout& dst_layout,
-                                                const region<3>& copy_region, size_t elem_size) {
+// for gpu for linearisiert or 3D/strided
+async_event oneapi_backend::enqueue_device_copy(device_id did, //which device by id
+                                                size_t lane,
+                                                const void* source,
+                                                void* dest,
+                                                const region_layout& src_layout, // orga of src_mem
+                                                const region_layout& dst_layout, // orga of dst_mem
+                                                const region<3>& copy_region, // offset und "size"
+                                                size_t elem_size) {
   OAPI_LOG_ENTER();
   return enqueue_work(did, lane, [this, did, lane, source, dest,
                                   src_layout, dst_layout, copy_region, elem_size](device_state& st) -> async_event {
-    const size_t bytes = copy_region.get_boxes()[0].get_area() * elem_size;
+    const size_t bytes = copy_region.get_boxes()[0].get_area() * elem_size; // for Logs
 
     // Linearized regions -> straight memcpy
     if (std::holds_alternative<linearized_layout>(src_layout) &&
-        std::holds_alternative<linearized_layout>(dst_layout)) {
+        std::holds_alternative<linearized_layout>(dst_layout)) { // beide Seiten sind linear
         const auto box = copy_region.get_boxes()[0];
         const size_t n = box.get_area() * elem_size;
         const size_t src_off = std::get<linearized_layout>(src_layout).offset_bytes;
         const size_t dst_off = std::get<linearized_layout>(dst_layout).offset_bytes;
         const void* src = static_cast<const char*>(source) + src_off;
-        void*       dst = static_cast<char*>(dest)        + dst_off;
+        void*       dst = static_cast<char*>(dest)         + dst_off;
 
         if (!m_config.profiling) {
-          // L0 blocking copy: no events allocated anywhere.
           spdlog::trace("oneAPI backend: device_copy linearized (blocking) n={} bytes", n);
           ze_command_list_handle_t cl = nullptr;
           ze_command_list_desc_t cl_desc{ ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC };
           cl_desc.commandQueueGroupOrdinal = st.queue_ordinal;
-          ze_check(zeCommandListCreate(st.context, st.device, &cl_desc, &cl), "zeCommandListCreate");
-          ze_check(zeCommandListAppendMemoryCopy(cl, dst, src, n, /*event*/nullptr, 0, nullptr),
+          ze_check(zeCommandListCreate(st.context, st.device, &cl_desc, &cl), "zeCommandListCreate"); // make Command-List
+          ze_check(zeCommandListAppendMemoryCopy(cl, dst, src, n, /*event*/nullptr, 0, nullptr), // do Copy
                    "zeCommandListAppendMemoryCopy");
-          ze_check(zeCommandListClose(cl), "zeCommandListClose");
-          ze_check(zeCommandQueueExecuteCommandLists(st.queue, 1, &cl, nullptr),
+          ze_check(zeCommandListClose(cl), "zeCommandListClose"); // schließen
+          ze_check(zeCommandQueueExecuteCommandLists(st.queue, 1, &cl, nullptr), // submitten
                    "zeCommandQueueExecuteCommandLists");
-          zeCommandListDestroy(cl);
-          ze_check(zeCommandQueueSynchronize(st.queue, UINT64_MAX), "zeCommandQueueSynchronize");
+          zeCommandListDestroy(cl); // destroy
+          ze_check(zeCommandQueueSynchronize(st.queue, UINT64_MAX), "zeCommandQueueSynchronize"); // warten bis fertig
           return make_complete_event();
         } else {
-          // SYCL path -> profiling info
           spdlog::trace("oneAPI backend: device_copy linearized (SYCL/profiling) n={} bytes", n);
-          auto& q = st.sycl_queue_for_lane(lane, /*profiling*/true);
+          auto& q = st.sycl_queue_for_lane(lane, true); // profiling = true
           sycl::event ev = q.memcpy(dst, src, n);
-          celerity::detail::sycl_backend_detail::flush(q);
+          celerity::detail::sycl_backend_detail::flush(q); // to get to nativ runtime
           using sy_ev = celerity::detail::sycl_backend_detail::sycl_event;
-          return make_async_event<sy_ev>(std::move(ev), /*profiling*/true);
+          return make_async_event<sy_ev>(std::move(ev), true); // profiling = true
         }
     }
 
-    // 3D region copy
+    // else: for 3D region copy
     spdlog::debug("oneAPI backend: device_copy(dev={}, lane={}): 3D copy ({} bytes approx, profiling={})",
                   did.value, lane, bytes, m_config.profiling);
 
     // If profiling is off, use a blocking L0 submission with no events to
-    // avoid per-copy event pool pressure.
+    // avoid per-copy event pool pressure
     if (!m_config.profiling) {
       ze_command_list_handle_t cl = nullptr;
       ze_command_list_desc_t cl_desc{ ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC };
       cl_desc.commandQueueGroupOrdinal = st.queue_ordinal;
       ze_check(zeCommandListCreate(st.context, st.device, &cl_desc, &cl), "zeCommandListCreate");
 
-      const auto box = copy_region.get_boxes()[0];
-      const auto off = box.get_min();
-      const auto ext = box.get_range();
+      const auto box = copy_region.get_boxes()[0]; // extract info from box
+      const auto off = box.get_min(); // Start-Koordinate
+      const auto ext = box.get_range(); // Breite/Höhe/Tiefe = Spalten/Zeilen/Ebenen
 
       ze_copy_region_t src_region{
         static_cast<uint32_t>(off[0] * elem_size),
@@ -479,8 +471,8 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
       };
       ze_copy_region_t dst_region = src_region;
 
-      const auto s = std::get<strided_layout>(src_layout).allocation.get_range();
-      const auto d = std::get<strided_layout>(dst_layout).allocation.get_range();
+      const auto s = std::get<strided_layout>(src_layout).allocation.get_range(); // in sx, sy, sz // sollte strided sein
+      const auto d = std::get<strided_layout>(dst_layout).allocation.get_range(); // in dx, dy, dz
 
       ze_check(zeCommandListAppendMemoryCopyRegion(
         cl,
@@ -488,14 +480,14 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
         source, &src_region, static_cast<uint32_t>(s[0] * elem_size), static_cast<uint32_t>(s[0] * s[1] * elem_size),
         /*event*/nullptr, 0, nullptr), "zeCommandListAppendMemoryCopyRegion(no-event)");
 
-      ze_check(zeCommandListClose(cl), "zeCommandListClose");
-      ze_check(zeCommandQueueExecuteCommandLists(st.queue, 1, &cl, nullptr), "zeCommandQueueExecuteCommandLists");
-      zeCommandListDestroy(cl);
-      ze_check(zeCommandQueueSynchronize(st.queue, UINT64_MAX), "zeCommandQueueSynchronize");
+      ze_check(zeCommandListClose(cl), "zeCommandListClose"); // close
+      ze_check(zeCommandQueueExecuteCommandLists(st.queue, 1, &cl, nullptr), "zeCommandQueueExecuteCommandLists"); // execute
+      zeCommandListDestroy(cl); // destroy
+      ze_check(zeCommandQueueSynchronize(st.queue, UINT64_MAX), "zeCommandQueueSynchronize"); // synchronize
       return make_complete_event();
     }
 
-    // Profiling ON path: create a tiny host-visible pool for exactly one event (kept owned by async_event)
+    // else: Profiling ON path: create a tiny host-visible pool for exactly one event (kept owned by async_event)
     ze_command_list_handle_t cl = nullptr;
     ze_command_list_desc_t cl_desc{ ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC };
     cl_desc.commandQueueGroupOrdinal = st.queue_ordinal;
@@ -504,12 +496,14 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
     ze_event_pool_handle_t pool = nullptr;
     ze_event_handle_t      evt  = nullptr;
 
+    //create Pool
     ze_event_pool_desc_t pool_desc{};
     pool_desc.stype = ZE_STRUCTURE_TYPE_EVENT_POOL_DESC;
     pool_desc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
     pool_desc.count = 1;
     ze_check(zeEventPoolCreate(st.context, &pool_desc, 1, &st.device, &pool), "zeEventPoolCreate");
 
+    // create Event
     ze_event_desc_t evt_desc{};
     evt_desc.stype  = ZE_STRUCTURE_TYPE_EVENT_DESC;
     evt_desc.index  = 0;
@@ -517,9 +511,9 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
     evt_desc.wait   = ZE_EVENT_SCOPE_FLAG_HOST;
     ze_check(zeEventCreate(pool, &evt_desc, &evt), "zeEventCreate");
 
-    const auto box = copy_region.get_boxes()[0];
-    const auto off = box.get_min();
-    const auto ext = box.get_range();
+    const auto box = copy_region.get_boxes()[0]; // extract info from box
+    const auto off = box.get_min();  // Start-Koordinate
+    const auto ext = box.get_range(); // Breite/Höhe/Tiefe = Spalten/Zeilen/Ebenen
 
     ze_copy_region_t src_region{
       static_cast<uint32_t>(off[0] * elem_size),
@@ -531,8 +525,8 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
     };
     ze_copy_region_t dst_region = src_region;
 
-    const auto s = std::get<strided_layout>(src_layout).allocation.get_range();
-    const auto d = std::get<strided_layout>(dst_layout).allocation.get_range();
+    const auto s = std::get<strided_layout>(src_layout).allocation.get_range(); // in sx, sy, sz // sollte strided sein
+    const auto d = std::get<strided_layout>(dst_layout).allocation.get_range(); // in dx, dy, dz
 
     ze_check(zeCommandListAppendMemoryCopyRegion(
       cl,
@@ -540,11 +534,11 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
       source, &src_region, static_cast<uint32_t>(s[0] * elem_size), static_cast<uint32_t>(s[0] * s[1] * elem_size),
       evt, 0, nullptr), "zeCommandListAppendMemoryCopyRegion");
 
-    ze_check(zeCommandListClose(cl), "zeCommandListClose");
-    ze_check(zeCommandQueueExecuteCommandLists(st.queue, 1, &cl, nullptr), "zeCommandQueueExecuteCommandLists");
-    zeCommandListDestroy(cl);
+    ze_check(zeCommandListClose(cl), "zeCommandListClose"); // close
+    ze_check(zeCommandQueueExecuteCommandLists(st.queue, 1, &cl, nullptr), "zeCommandQueueExecuteCommandLists"); // execute
+    zeCommandListDestroy(cl); // destroy
 
-    return make_event_from_ze_owned(evt, pool);
+    return make_event_from_ze_owned(evt, pool); // fertiges Event
   });
 }
 
@@ -554,47 +548,50 @@ async_event oneapi_backend::enqueue_device_copy(device_id did, size_t lane,
 void oneapi_backend::check_async_errors() {
   OAPI_LOG_ENTER();
   for (auto& st : m_devices) {
-    for (auto& qp : st.sycl_lanes) if (qp) qp->wait_and_throw();
-    ze_result_t r = zeCommandQueueSynchronize(st.queue, 0);
-    if (r != ZE_RESULT_SUCCESS && r != ZE_RESULT_NOT_READY) {
+    for (auto& qp : st.sycl_lanes) if (qp) qp->wait_and_throw(); // check with sycl
+    ze_result_t r = zeCommandQueueSynchronize(st.queue, 0); // check with L0
+    if (r != ZE_RESULT_SUCCESS && r != ZE_RESULT_NOT_READY) { // alles andere -> error
       throw std::runtime_error("Level-Zero asynchronous error detected");
     }
   }
 }
 
 // ----------------------------------------------------------------------------
-// events (wrappers)
+// Event-Implementierung (wrappers)
 // ----------------------------------------------------------------------------
 class ze_event_impl final : public async_event_impl {
 public:
   ze_event_impl(ze_event_handle_t evt, ze_event_pool_handle_t pool, bool owns_evt, bool owns_pool)
-  : m_event(evt), m_pool(pool), m_owns_evt(owns_evt), m_owns_pool(owns_pool) {
+  : m_event(evt), m_pool(pool), m_owns_evt(owns_evt), m_owns_pool(owns_pool) { // ctor 2 mode: Own/Responsible
     spdlog::debug("oneAPI backend: ze_event_impl(evt={}, pool={}, owns_evt={}, owns_pool={})",
                   static_cast<void*>(evt), static_cast<void*>(pool), owns_evt, owns_pool);
   }
 
-  ~ze_event_impl() override {
+  ~ze_event_impl() override { // dtor
     spdlog::debug("oneAPI backend: ~ze_event_impl(evt={}, owns_evt={}, owns_pool={})",
                   static_cast<void*>(m_event), m_owns_evt, m_owns_pool);
     if (m_owns_evt && m_event) {
-      zeEventHostSynchronize(m_event, UINT64_MAX);
-      zeEventDestroy(m_event);
+      zeEventHostSynchronize(m_event, UINT64_MAX); // warten
+      zeEventDestroy(m_event); // destroy
     }
-    if (m_owns_pool && m_pool) zeEventPoolDestroy(m_pool);
+    if (m_owns_pool && m_pool) zeEventPoolDestroy(m_pool); // pool destroy
   }
 
-  bool is_complete() override {
+  bool is_complete() override { // pollt das Event -> true/false
     ze_result_t status = zeEventQueryStatus(m_event);
     return status == ZE_RESULT_SUCCESS;
   }
 
-private:
+private: // for Members
   ze_event_handle_t m_event{};
   ze_event_pool_handle_t m_pool{};
   bool m_owns_evt{};
   bool m_owns_pool{};
 };
 
+// -----
+// Factory-Helpers
+// -----
 async_event make_event_from_native_sycl(ze_event_handle_t evt) {
   OAPI_LOG_ENTER();
   return make_async_event<ze_event_impl>(evt, /*pool*/nullptr, /*owns_evt*/false, /*owns_pool*/false);
@@ -606,33 +603,34 @@ async_event make_event_from_ze_owned(ze_event_handle_t evt, ze_event_pool_handle
 }
 
 // ----------------------------------------------------------------------------
-// host_state
+// host_state(CPU)
 // ----------------------------------------------------------------------------
 oneapi_backend::host_state::host_state(ze_context_handle_t ctx, bool profiling)
-: context(ctx), profiling(profiling), alloc_queue(named_threads::thread_type::alloc, profiling) {
+: context(ctx), profiling(profiling), alloc_queue(named_threads::thread_type::alloc, profiling) { // ctor
   spdlog::debug("oneAPI backend: host_state(ctx={}, profiling={})", static_cast<void*>(ctx), profiling);
 }
 
-thread_queue& oneapi_backend::host_state::get_queue(size_t lane) {
+thread_queue& oneapi_backend::host_state::get_queue(size_t lane) { // queue getter //glaub nicht thread save
   OAPI_LOG_ENTER();
   while (lane >= host_queues.size()) {
     spdlog::debug("oneAPI backend: creating host queue for lane {}", host_queues.size());
     host_queues.emplace_back(named_threads::task_type_host_queue(host_queues.size()), profiling);
   }
-  return host_queues[lane];
+  return host_queues[lane]; // host queue fur lane
 }
 
 // ----------------------------------------------------------------------------
 // common work submit
 // ----------------------------------------------------------------------------
-async_event oneapi_backend::enqueue_work(device_id did, size_t lane,
+async_event oneapi_backend::enqueue_work(device_id did, // which device by id
+                                         size_t lane,
                                          std::function<async_event(device_state&)> work) {
   OAPI_LOG_ENTER();
-  const size_t idx = static_cast<size_t>(did);
+  const size_t idx = static_cast<size_t>(did); // need an index
   if (idx >= m_devices.size()) throw std::runtime_error("enqueue_work: invalid device_id");
-  device_state& st = m_devices[idx];
+  device_state& st = m_devices[idx]; // associated device
   spdlog::debug("oneAPI backend: dispatching work(dev={}, lane={})", did.value, lane);
-  return work(st);
+  return work(st); // meist exec Lambda mit device_state
 }
 
 } // namespace celerity::detail

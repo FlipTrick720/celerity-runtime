@@ -21,7 +21,6 @@ namespace celerity::detail {
 
 class oneapi_backend final : public backend {
 public:
-  // Keep as aggregate (no user ctors!) so designated init in sycl_backend.cc works.
   struct configuration {
     bool profiling = false;
     bool per_device_submission_threads = true;

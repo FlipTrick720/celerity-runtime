@@ -10,11 +10,16 @@ set -Eeuo pipefail
 
 # -------------------------------
 # Profile selection
-#   Choose with:  ./run_test.sh --profile clean           "test name"
-#                  or set PROFILE=clean|immediate|pin0|idx0|noisy
+#   Choose with:  ./run_test.sh --profile clean
+#                  or set PROFILE=clean|test|noisy
 # Defaults to: clean
 # -------------------------------
 PROFILE="${PROFILE:-clean}"
+
+if [[ "${1:-}" == "--profile" && -n "${2:-}" ]]; then
+  PROFILE="$2"
+  shift 2
+fi
 
 # ---- logging ----
 ts="$(date +%Y%m%d_%H%M%S)"
@@ -28,7 +33,7 @@ set +u
 source /opt/intel/oneapi/setvars.sh || echo "WARN: setvars.sh returned non-zero"
 set -u
 
-# Clear any leftovers that often bite
+# Clear any leftovers
 unset ONEAPI_DEVICE_SELECTOR
 unset SYCL_UR_TRACE
 unset ZE_DEBUG
@@ -47,38 +52,17 @@ case "$PROFILE" in
     export UR_DISABLE_ADAPTERS=OPENCL
     ;;
 
-  immediate)
-    # clean + immediate command lists for copy/submit pressure relief
+  test)
+    # test (to test different things)
+    export ZE_AFFINITY_MASK=0
     export SYCL_DEVICE_FILTER=level_zero:gpu
-    export UR_ENABLE_LAYERS=""
-    export UR_LOG_LEVEL=warning
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
     export UR_DISABLE_ADAPTERS=OPENCL
-    export UR_L0_USE_IMMEDIATE_COMMANDLISTS=1
-    export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1   # legacy env some builds honor
-    ;;
-
-  pin0)
-    # clean + pin to GPU0.tile0 (can help or hurt; try if you want strict pin)
-    export SYCL_DEVICE_FILTER=level_zero:gpu
-    export ZE_AFFINITY_MASK=0.0
-    export UR_ENABLE_LAYERS=""
-    export UR_LOG_LEVEL=warning
-    export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
-    export UR_DISABLE_ADAPTERS=OPENCL
-    ;;
-
-  idx0)
-    # If you WANT explicit device index — some Celerity builds dislike the ':0', so use with care.
-    export SYCL_DEVICE_FILTER=level_zero:gpu:0
-    export UR_ENABLE_LAYERS=""
-    export UR_LOG_LEVEL=warning
-    export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
-    export UR_DISABLE_ADAPTERS=OPENCL
+    export SYCL_BE=PI_LEVEL_ZERO
     ;;
 
   noisy)
-    # Verbose UR/ZE tracing (for deep debugging)
+    # Verbose
     export SYCL_DEVICE_FILTER=level_zero:gpu
     export UR_ENABLE_LAYERS="LOGGING;VALIDATION;TRACING"
     export UR_LOG_LEVEL=debug
@@ -89,7 +73,7 @@ case "$PROFILE" in
     ;;
 
   *)
-    echo "Unknown PROFILE='$PROFILE'. Use clean|immediate|pin0|idx0|noisy"
+    echo "Unknown PROFILE='$PROFILE'. Use clean|test|noisy"
     exit 2
     ;;
 esac
@@ -135,7 +119,7 @@ fi
 
 # ---- build dir (auto-detect latest unless BUILD_DIR is set) ----
 echo ":: current directory: $(pwd)"
-BUILD_DIR="${BUILD_DIR:-$(ls -d ~/testApproach/celerity-runtime/build_2025* 2>/dev/null | sort | tail -n1)}"
+BUILD_DIR="${BUILD_DIR:-$(ls -d ~/celerity-runtime/build_2025* 2>/dev/null | sort | tail -n1)}"
 TEST_DIR="${TEST_DIR:-$BUILD_DIR/test}"
 echo ":: using test directory: ${TEST_DIR}"
 cd "${TEST_DIR}" || { echo "ERROR: cannot cd to ${TEST_DIR}"; exit 1; }
@@ -179,6 +163,13 @@ else
 fi
 set -e
 echo ":: all_tests exited with status $status"
+
+# ---- guard against generic backend fallback ----
+if grep -E -q '(falling back to generic|Using platform "Intel\(R\) OpenCL Graphics")' "$runlog"; then
+  echo ":: HARD-FAIL: Celerity fell back to generic (OpenCL) backend."
+  echo ":: Check that SYCL_DEVICE_FILTER=level_zero:gpu and UR_DISABLE_ADAPTERS=OPENCL are in effect."
+  exit 3
+fi
 
 # ---- coredump fallback ----
 if [[ $status -ne 0 ]] && command -v coredumpctl >/dev/null 2>&1; then
