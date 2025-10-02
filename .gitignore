@@ -11,3 +11,4 @@ install
 .idea/
 /tags
 __pycache__/
+tmp*
