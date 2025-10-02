@@ -90,7 +90,9 @@ case "$PROFILE" in
     export UR_LOG_LEVEL=warning
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
     export UR_DISABLE_ADAPTERS=OPENCL
-    export ZE_AFFINITY_MASK=0 
+    export ZE_AFFINITY_MASK=0
+    # Force Level Zero device selection
+    export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
     ;;
   test)
     # Level Zero only, explicit plugin selection hints
@@ -99,6 +101,9 @@ case "$PROFILE" in
     export UR_DISABLE_ADAPTERS=OPENCL
     export SYCL_BE=PI_LEVEL_ZERO
     export ZE_AFFINITY_MASK=0
+    # More aggressive Level Zero forcing
+    export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+    export SYCL_PREFER_UR=1
     export UR_ENABLE_LAYERS="LOGGING;VALIDATION"
     export UR_LOG_LEVEL=debug
     export SYCL_UR_TRACE=2
@@ -206,8 +211,17 @@ set -e
 echo ":: all_tests exited with status $status"
 
 # -------- guard against generic backend fallback --------
-if grep -E -q '(falling back to generic|Using platform "Intel\(R\) OpenCL Graphics")' "$runlog"; then
-  echo ":: HARD-FAIL: Celerity fell back to generic (OpenCL) backend."
+# Check for actual backend fallback (not just misleading platform names)
+if grep -E -q 'falling back to generic' "$runlog"; then
+  echo ":: HARD-FAIL: Celerity fell back to generic backend."
+  echo ":: This indicates no backend specialization is available for the selected devices."
+  echo ":: Check device compatibility and backend configuration."
+  exit 3
+fi
+
+# Check if we're actually using OpenCL instead of Level Zero (real failure case)
+if grep -E -q 'Using platform.*Intel.*OpenCL.*' "$runlog" && ! grep -E -q 'oneAPI Unified Runtime over Level-Zero' "$runlog"; then
+  echo ":: HARD-FAIL: Only OpenCL backend detected, Level Zero not available."
   echo ":: Ensure SYCL_DEVICE_FILTER=level_zero:gpu and UR_DISABLE_ADAPTERS=OPENCL are in effect."
   exit 3
 fi
