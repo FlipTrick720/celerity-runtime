@@ -10,12 +10,13 @@
 # run_test.sh — run celerity's `all_tests` with controlled oneAPI/L0 env
 #
 # Usage
-#   ./run_test.sh [--profile clean|test|noisy] [--gdb] [--] [gtest-args...]
+#   ./run_test.sh [--profile clean|test|noisy|debug] [--gdb] [--] [gtest-args...]
 #
 # Profiles
 #   clean : Level Zero only, minimal layers (default). Good for normal runs.
 #   test  : Level Zero only + explicit BE hints (PI_LEVEL_ZERO), simple pinning.
 #   noisy : Very verbose logging/tracing from UR/L0 for debugging.
+#   debug : Maximum debugging + auto-GDB for crash investigation.
 #
 # Examples
 #   sbatch run_test.sh --profile test
@@ -33,6 +34,7 @@ set -Eeuo pipefail
 # -------- args --------
 PROFILE="${PROFILE:-clean}"
 USE_GDB=0
+TEST_FILTER=""
 
 usage() {
   sed -n '1,40p' "$0" >&2
@@ -45,6 +47,9 @@ while [[ $# -gt 0 ]]; do
       PROFILE="$2"; shift 2 ;;
     --gdb)
       USE_GDB=1; shift ;;
+    --filter)
+      [[ $# -ge 2 ]] || { echo "Missing value for --filter" >&2; exit 2; }
+      TEST_FILTER="$2"; shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     --) shift; break ;;
@@ -119,8 +124,29 @@ case "$PROFILE" in
     export UR_DISABLE_ADAPTERS=OPENCL
     export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
     ;;
+  debug)
+    # Maximum debugging for crash investigation
+    export SYCL_DEVICE_FILTER=level_zero:gpu
+    export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
+    export UR_DISABLE_ADAPTERS=OPENCL
+    export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+    export SYCL_BE=PI_LEVEL_ZERO
+    export ZE_AFFINITY_MASK=0
+    # Enhanced debugging
+    export UR_ENABLE_LAYERS="LOGGING;VALIDATION;TRACING"
+    export UR_LOG_LEVEL=debug
+    export SYCL_UR_TRACE=2
+    export ZE_DEBUG=1
+    export SPDLOG_LEVEL=debug
+    export CELERITY_LOG_LEVEL=debug
+    # Memory debugging
+    export MALLOC_CHECK_=2
+    export MALLOC_PERTURB_=42
+    # Force GDB for this profile
+    USE_GDB=1
+    ;;
   *)
-    echo "Unknown PROFILE='$PROFILE'. Use clean|test|noisy" >&2
+    echo "Unknown PROFILE='$PROFILE'. Use clean|test|noisy|debug" >&2
     exit 2
     ;;
 esac
@@ -185,6 +211,13 @@ else
   echo ":: no test arguments (running all tests)"
 fi
 
+# Prepare test arguments
+test_args=("$@")
+if [[ -n "$TEST_FILTER" ]]; then
+  test_args+=("--gtest_filter=$TEST_FILTER")
+  echo ":: applying test filter: $TEST_FILTER"
+fi
+
 set +e
 if (( USE_GDB )) && command -v gdb >/dev/null 2>&1; then
   echo ":: running under GDB (batch mode) for backtrace"
@@ -198,11 +231,11 @@ if (( USE_GDB )) && command -v gdb >/dev/null 2>&1; then
     -ex "info threads" \
     -ex "info registers" \
     -ex "info sharedlibrary" \
-    --args ./all_tests "$@"
+    --args ./all_tests "${test_args[@]}"
   status=$?
 else
   echo ":: running without GDB..."
-  ./all_tests "$@"
+  ./all_tests "${test_args[@]}"
   status=$?
 fi
 set -e
@@ -225,10 +258,46 @@ if grep -E -q 'Using platform.*Intel.*OpenCL.*' "$runlog" && ! grep -E -q 'oneAP
   exit 3
 fi
 
-# -------- coredump summary (if failed) --------
-if [[ $status -ne 0 ]] && command -v coredumpctl >/dev/null 2>&1; then
-  echo; echo ":: coredumpctl summary for all_tests (if any):"
-  coredumpctl info all_tests || true
+# -------- better coredump analyses --------
+if [[ $status -ne 0 ]]; then
+  echo; echo ":: CRASH ANALYSIS"
+  
+  # Check for core dumps
+  if command -v coredumpctl >/dev/null 2>&1; then
+    echo ":: coredumpctl summary for all_tests:"
+    coredumpctl info all_tests || true
+    
+    # Get the latest core dump for detailed analysis
+    latest_core=$(coredumpctl list all_tests --no-pager --no-legend | tail -n1 | awk '{print $5}' 2>/dev/null || true)
+    if [[ -n "$latest_core" ]]; then
+      echo ":: Latest core dump PID: $latest_core"
+      echo ":: Detailed backtrace from core dump:"
+      coredumpctl gdb all_tests --batch \
+        -ex "set pagination off" \
+        -ex "bt full" \
+        -ex "thread apply all bt full" \
+        -ex "info threads" \
+        -ex "info registers" \
+        -ex "quit" 2>/dev/null || true
+    fi
+  fi
+  
+  # Check for local core files
+  echo ":: Checking for local core files:"
+  find . -name "core*" -type f -newer ./all_tests 2>/dev/null | head -5 || true
+  
+  # Memory/resource analysis
+  echo ":: System resource status:"
+  echo "  Memory: $(free -h | grep '^Mem:' || echo 'unavailable')"
+  echo "  GPU memory: $(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null || echo 'N/A (not NVIDIA)')"
+  
+  # Check for common crash patterns in logs
+  echo ":: Crash pattern analysis:"
+  if grep -E -i "(segmentation fault|segfault|sigsegv|sigabrt|assertion.*failed|abort|terminate)" "$runlog" | head -5; then
+    echo "  Found crash indicators in logs"
+  else
+    echo "  No obvious crash patterns in logs"
+  fi
 fi
 
 # -------- final summary --------
