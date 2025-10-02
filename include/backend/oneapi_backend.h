@@ -1,3 +1,5 @@
+// oneapi_backend.h
+
 #pragma once
 
 #include "backend/backend.h"
@@ -77,16 +79,15 @@ public:
   const char* name() const { return "oneAPI/Level-Zero"; }
 
 private:
-  struct device_state {
+struct device_state {
     // Native L0
-    ze_device_handle_t        device{};
-    ze_context_handle_t       context{};
-    ze_command_queue_handle_t queue{};
-    uint32_t                  queue_ordinal = 0;
+    ze_device_handle_t  device{};
+    ze_context_handle_t context{};
+    uint32_t            compute_ordinal = 0;
 
     // SYCL interop
     sycl::device  sycl_dev{};
-    sycl::context sycl_ctx{}; // assigned in .cc via make_context
+    sycl::context sycl_ctx{};
     std::vector<std::unique_ptr<sycl::queue>> sycl_lanes;
 
     std::optional<thread_queue> submit_thread;
