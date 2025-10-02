@@ -91,7 +91,6 @@ case "$PROFILE" in
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
     export UR_DISABLE_ADAPTERS=OPENCL
     export ZE_AFFINITY_MASK=0
-    # Force Level Zero device selection
     export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
     ;;
   test)
@@ -101,7 +100,6 @@ case "$PROFILE" in
     export UR_DISABLE_ADAPTERS=OPENCL
     export SYCL_BE=PI_LEVEL_ZERO
     export ZE_AFFINITY_MASK=0
-    # More aggressive Level Zero forcing
     export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
     export SYCL_PREFER_UR=1
     export UR_ENABLE_LAYERS="LOGGING;VALIDATION"
@@ -119,6 +117,7 @@ case "$PROFILE" in
     export ZE_DEBUG=4
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
     export UR_DISABLE_ADAPTERS=OPENCL
+    export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
     ;;
   *)
     echo "Unknown PROFILE='$PROFILE'. Use clean|test|noisy" >&2
