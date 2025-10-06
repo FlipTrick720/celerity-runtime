@@ -10,13 +10,14 @@
 # run_test.sh — run celerity's `all_tests` with controlled oneAPI/L0 env
 #
 # Usage
-#   ./run_test.sh [--profile clean|test|noisy|debug] [--gdb] [--] [gtest-args...]
+#   ./run_test.sh [--profile clean|test|verbose|noisy|debug] [--gdb] [--] [gtest-args...]
 #
 # Profiles
-#   clean : Level Zero only, minimal layers (default). Good for normal runs.
-#   test  : Level Zero only + explicit BE hints (PI_LEVEL_ZERO), simple pinning.
-#   noisy : Very verbose logging/tracing from UR/L0 for debugging.
-#   debug : Maximum debugging + auto-GDB for crash investigation.
+#   clean   : Level Zero only, minimal layers (default). Good for normal runs.
+#   test    : Level Zero only, clean output like professional CI. Recommended.
+#   verbose : Level Zero + detailed UR tracing (old 'test' profile).
+#   noisy   : Very verbose logging/tracing from UR/L0 for debugging.
+#   debug   : Maximum debugging + auto-GDB for crash investigation.
 #
 # Examples
 #   sbatch run_test.sh --profile test
@@ -99,7 +100,21 @@ case "$PROFILE" in
     export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
     ;;
   test)
-    # Level Zero only, explicit plugin selection hints
+    # Level Zero only, similar to professional CI setup
+    export SYCL_DEVICE_FILTER=level_zero:gpu
+    export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
+    export UR_DISABLE_ADAPTERS=OPENCL
+    export ONEAPI_DEVICE_SELECTOR=level_zero:*
+    export ZE_AFFINITY_MASK=0
+    # Test-friendly logging (respects build type)
+    export UR_ENABLE_LAYERS="VALIDATION"
+    export UR_LOG_LEVEL=warning
+    # Don't override CELERITY_LOG_LEVEL - let it use build-type defaults
+    # (debug builds expect debug logs, release builds expect info logs)
+    export SPDLOG_LEVEL=debug
+    ;;
+  verbose)
+    # More detailed logging (old 'test' profile)
     export SYCL_DEVICE_FILTER=level_zero:gpu
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
     export UR_DISABLE_ADAPTERS=OPENCL
@@ -116,13 +131,14 @@ case "$PROFILE" in
   noisy)
     # Verbose tracing/validation
     export SYCL_DEVICE_FILTER=level_zero:gpu
-    export UR_ENABLE_LAYERS="LOGGING;VALIDATION;TRACING"
+    export UR_ENABLE_LAYERS="LOGGING;VALIDATION"
     export UR_LOG_LEVEL=debug
-    export SYCL_UR_TRACE=1
+    export SYCL_UR_TRACE=2
     export ZE_DEBUG=4
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
     export UR_DISABLE_ADAPTERS=OPENCL
     export ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+    export CELERITY_LOG_LEVEL=trace
     ;;
   debug)
     # Maximum debugging for crash investigation
@@ -146,7 +162,7 @@ case "$PROFILE" in
     USE_GDB=1
     ;;
   *)
-    echo "Unknown PROFILE='$PROFILE'. Use clean|test|noisy|debug" >&2
+    echo "Unknown PROFILE='$PROFILE'. Use clean|test|verbose|noisy|debug" >&2
     exit 2
     ;;
 esac
@@ -190,9 +206,43 @@ fi
 
 # -------- pick test dir --------
 echo ":: current directory: $(pwd)"
-BUILD_DIR="${BUILD_DIR:-$(ls -d ~/celerity-runtime/build_2025* 2>/dev/null | sort | tail -n1 || true)}"
+
+# Auto-detect celerity-runtime directory from various common locations
+if [[ -z "${BUILD_DIR:-}" ]]; then
+  # Search paths in order of preference
+  search_paths=(
+    "$(pwd)"                                    # Current directory
+    "$(pwd)/celerity-runtime"                  # Subdirectory of current
+    "$(dirname "$(pwd)")/celerity-runtime"     # Sibling directory
+    "$HOME/celerity-runtime"                   # Home directory
+    "$HOME/testApproach/celerity-runtime"      # Your testApproach folder
+    "$HOME/mainApproach/celerity-runtime"      # Your mainApproach folder
+  )
+  
+  for base_dir in "${search_paths[@]}"; do
+    if [[ -d "$base_dir" ]]; then
+      # Look for the newest build directory in this location
+      candidate=$(ls -d "$base_dir"/build_2025* 2>/dev/null | sort | tail -n1 || true)
+      if [[ -n "$candidate" && -d "$candidate" ]]; then
+        BUILD_DIR="$candidate"
+        echo ":: found build directory: $BUILD_DIR"
+        break
+      fi
+    fi
+  done
+fi
+
 TEST_DIR="${TEST_DIR:-${BUILD_DIR:+$BUILD_DIR/test}}"
 echo ":: using test directory: ${TEST_DIR:-<none>}"
+
+if [[ -z "$TEST_DIR" ]]; then
+  echo "ERROR: Could not find celerity-runtime build directory"
+  echo "Searched in:"
+  printf "  %s\n" "${search_paths[@]}"
+  echo "Set BUILD_DIR environment variable to override"
+  exit 1
+fi
+
 cd "${TEST_DIR}" || { echo "ERROR: cannot cd to ${TEST_DIR}"; exit 1; }
 
 echo ":: checking if all_tests exists..."
@@ -221,7 +271,7 @@ fi
 set +e
 if (( USE_GDB )) && command -v gdb >/dev/null 2>&1; then
   echo ":: running under GDB (batch mode) for backtrace"
-  gdb -q -batch \
+  timeout 300 gdb -q -batch \
     -ex "set pagination off" \
     -ex "set confirm off" \
     -ex "set print thread-events off" \
@@ -234,8 +284,8 @@ if (( USE_GDB )) && command -v gdb >/dev/null 2>&1; then
     --args ./all_tests "${test_args[@]}"
   status=$?
 else
-  echo ":: running without GDB..."
-  ./all_tests "${test_args[@]}"
+  echo ":: running without GDB (5 minute timeout)..."
+  timeout 300 ./all_tests "${test_args[@]}"
   status=$?
 fi
 set -e

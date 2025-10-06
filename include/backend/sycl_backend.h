@@ -159,6 +159,17 @@ class sycl_cuda_backend final : public sycl_backend {
 };
 #endif
 
+#if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
+/// Level Zero specialized implementation of `sycl_backend` that uses SYCL operations optimized for Level Zero.
+class sycl_level_zero_backend final : public sycl_backend {
+  public:
+	sycl_level_zero_backend(const std::vector<sycl::device>& devices, const sycl_backend::configuration& config);
+
+	async_event enqueue_device_copy(device_id device, size_t device_lane, const void* const source_base, void* const dest_base,
+	    const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size) override;
+};
+#endif
+
 /// We differentiate between non-specialized and specialized Celerity SYCL backends.
 enum class sycl_backend_type { generic, cuda, level_zero };
 

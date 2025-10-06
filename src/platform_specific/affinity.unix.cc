@@ -112,7 +112,7 @@ bool initialize(const runtime_configuration& cfg) {
 		for(uint32_t i = 0; i < std::min(static_cast<unsigned>(CPU_SETSIZE), std::thread::hardware_concurrency()); ++i) {
 			available_cores_str += CPU_ISSET(i, &g_state.available_cores) ? "1" : "0";
 		}
-		CELERITY_TRACE("Affinity: Initialized, available cores: {}", available_cores_str);
+		CELERITY_INFO("Affinity: Initialized, available cores: {}", available_cores_str);
 	}
 
 	// pinned threads per process: application, scheduler, executor, 1 device submitter per device if enabled
@@ -145,7 +145,7 @@ bool initialize(const runtime_configuration& cfg) {
 			// to the ones next to it in this sequence, so that communication between them is fast
 			selected_core_ids = get_available_sequential_cores(g_state.available_cores, total_threads, cfg.standard_core_start_id);
 			if(selected_core_ids.empty()) {
-				CELERITY_WARN("Insufficient logical cores available for thread pinning (required {} starting from {}, {} available), disabling pinning."
+				CELERITY_INFO("Insufficient logical cores available for thread pinning (required {} starting from {}, {} available), disabling pinning."
 				              " Performance may be negatively impacted.", //
 				    total_threads, cfg.standard_core_start_id, CPU_COUNT(&g_state.available_cores));
 			}

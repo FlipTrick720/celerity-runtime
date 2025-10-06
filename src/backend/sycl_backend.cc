@@ -33,10 +33,6 @@
 #include <fmt/ranges.h>
 #include <sycl/sycl.hpp>
 
-#if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
-  #include "backend/oneapi_backend.h"
-#endif
-
 
 namespace celerity::detail::sycl_backend_detail {
 
@@ -394,22 +390,11 @@ std::unique_ptr<backend> make_sycl_backend(const sycl_backend_type type, const s
 #else
 		utils::panic("CUDA backend has not been compiled");
 #endif
-case sycl_backend_type::level_zero:
+	case sycl_backend_type::level_zero:
 #if CELERITY_DETAIL_BACKEND_LEVEL_ZERO_ENABLED
-{
-    std::vector<ze_device_handle_t> ze_devs;
-    ze_devs.reserve(devices.size());
-    for (const auto& d : devices) {
-        ze_devs.push_back(sycl::get_native<sycl::backend::ext_oneapi_level_zero>(d));
-    }
-    oneapi_backend::configuration l0_cfg{
-        .profiling = config.profiling,
-		.per_device_submission_threads = config.per_device_submission_threads
-    };
-    return make_oneapi_backend(ze_devs, l0_cfg);
-}
+		return std::make_unique<sycl_level_zero_backend>(devices, config);
 #else
-    utils::panic("Level-Zero backend has not been compiled");
+		utils::panic("Level-Zero backend has not been compiled");
 #endif
 	}
 	utils::unreachable(); // LCOV_EXCL_LINE

@@ -52,6 +52,7 @@ struct fmt::formatter<celerity::detail::sycl_backend_type> : fmt::formatter<std:
 			switch(type) {
 			case celerity::detail::sycl_backend_type::generic: return "generic";
 			case celerity::detail::sycl_backend_type::cuda: return "CUDA";
+			case celerity::detail::sycl_backend_type::level_zero: return "level_zero";
 			default: celerity::detail::utils::unreachable(); // LCOV_EXCL_LINE
 			}
 		}();
