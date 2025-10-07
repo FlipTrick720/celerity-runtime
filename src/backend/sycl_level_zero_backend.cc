@@ -154,12 +154,12 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
 	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 	
-	// Clean up command list immediately
-	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
+	// Synchronize the Level Zero queue to ensure all operations complete
+	// This is critical for proper ordering with subsequent SYCL operations
+	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
 	
-	// Wait for Level Zero operations to complete, then create SYCL barrier
-	// This ensures proper synchronization between native Level Zero and SYCL
-	ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
+	// Clean up Level Zero resources
+	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 	zeEventDestroy(ze_event);
 	zeEventPoolDestroy(ze_event_pool);
 	
@@ -199,12 +199,12 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
 		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
 		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 		    
-		    // Clean up command list immediately
-		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
+		    // Synchronize the Level Zero queue to ensure all operations complete
+		    // This is critical for proper ordering with subsequent SYCL operations
+		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
 		    
-		    // Wait for Level Zero operations to complete, then create SYCL barrier
-		    // This ensures proper synchronization between native Level Zero and SYCL
-		    ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
+		    // Clean up Level Zero resources
+		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 		    zeEventDestroy(ze_event);
 		    zeEventPoolDestroy(ze_event_pool);
 		    
