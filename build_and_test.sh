@@ -3,7 +3,7 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$PWD"
 cd "$SCRIPT_DIR"
 
 echo "=========================================="
@@ -12,7 +12,7 @@ echo "=========================================="
 echo
 
 # Check if we need to build
-LATEST_BUILD=$(ls -d build_* 2>/dev/null | sort | tail -n1 || true)
+LATEST_BUILD=$(ls -d build_20* 2>/dev/null | sort | tail -n1 || true)
 if [[ -z "$LATEST_BUILD" ]]; then
   echo "📦 No build found, building now..."
   ./build_celerity.sh
@@ -26,5 +26,5 @@ else
 fi
 
 echo
-echo "🧪 Running tests..."
-./run_test.sh --profile test "$@"
+echo "🧪 Running tests via sbatch ... look in z_output.log for Logs"
+sbatch run_test.sh --profile test

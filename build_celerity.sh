@@ -9,10 +9,13 @@ TIMESTAMP=$(date -u +%Y-%m-%d_%H-%M-%S)
 BUILD_DIR="$BASE_DIR/build_$TIMESTAMP"
 LOGFILE="$BASE_DIR/build_logs/build_$TIMESTAMP.log"
 
+mkdir -p "$BASE_DIR/build_logs"
+
 echo "📁 Creating isolated build directory: $BUILD_DIR" | tee -a "$LOGFILE"
 mkdir "$BUILD_DIR"
 cd "$BUILD_DIR"
 
+echo "🔧 Building..."
 echo "🔧 Running CMake..." | tee -a "$LOGFILE"
 cmake .. -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
