@@ -1,5 +1,4 @@
 #include "backend/sycl_backend.h"
-
 #include "async_event.h"
 #include "grid.h"
 #include "log.h"
@@ -15,7 +14,6 @@
 #include <utility>
 #include <vector>
 
-// Native Level Zero backend implementation - fixed compilation issues
 #include <level_zero/ze_api.h>
 #include <sycl/sycl.hpp>
 #include <sycl/backend.hpp>
@@ -26,7 +24,7 @@ namespace celerity::detail::level_zero_backend_detail {
 // Level Zero error checking helper
 static inline void ze_check(ze_result_t result, const char* where) {
 	if(result != ZE_RESULT_SUCCESS) {
-		utils::panic("Level-Zero error in {}: code={}", where, static_cast<int>(result));
+		utils::panic("Level-Zero error in {}:: code={}", where, static_cast<int>(result));
 	}
 }
 
@@ -85,6 +83,7 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	assert(source_box.covers(copy_box));
 	assert(dest_box.covers(copy_box));
 	
+	// compute layout/strides/offsets
 	const auto src_range = source_box.get_range();
 	const auto dst_range = dest_box.get_range();
 	const auto copy_range = copy_box.get_range();
@@ -110,12 +109,14 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	ze_check(zeCommandListCreate(ze_context, ze_device, &cmd_list_desc, &cmd_list), "zeCommandListCreate");
 	
 	if(layout.num_complex_strides == 0) {
+		// 1) Contiguous: single blit
 		// Single contiguous copy
 		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
 		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
 		ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
 		CELERITY_TRACE("Level-Zero backend: contiguous copy {} bytes", layout.contiguous_size);
 	} else if(layout.num_complex_strides == 1) {
+		// 2) 2D region copy
 		// Optimized 2D copy using Level Zero's native 2D copy operation
 		const auto& stride = layout.strides[0];
 		const size_t width = layout.contiguous_size;
@@ -135,19 +136,28 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 		
 		CELERITY_TRACE("Level-Zero backend: 2D copy {}x{} bytes (src_pitch={}, dst_pitch={})", width, height, src_pitch, dst_pitch);
 	} else {
-		// Multiple 1D copies for complex 3D layouts - use the last operation for the event
-		bool first = true;
+		// 3) 3D: many 1D copies (signal event on the LAST chunk only)
+		// Multiple 1D copies for complex 3D layouts
+		// First, collect all chunks to know which is the last one
+		std::vector<std::tuple<size_t, size_t, size_t>> chunks;
 		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
-			const void* src_ptr = static_cast<const char*>(source_base) + src_off;
-			void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
-			// Only signal event on the last operation
-			ze_event_handle_t event_to_use = first ? nullptr : ze_event;
-			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
-			first = false;
+			chunks.emplace_back(src_off, dst_off, size);
 		});
 		
-		const size_t num_chunks = layout.strides[0].count * layout.strides[1].count;
-		CELERITY_TRACE("Level-Zero backend: 3D copy {} chunks of {} bytes", num_chunks, layout.contiguous_size);
+		// Now append all copies, signaling event only on the last one
+		for(size_t i = 0; i < chunks.size(); ++i) {
+			const auto& [src_off, dst_off, size] = chunks[i];
+			const void* src_ptr = static_cast<const char*>(source_base) + src_off;
+			void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
+			
+			// Signal event ONLY on the last chunk
+			const bool is_last = (i == chunks.size() - 1);
+			ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
+			
+			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		}
+		
+		CELERITY_TRACE("Level-Zero backend: 3D copy {} chunks of {} bytes", chunks.size(), layout.contiguous_size);
 	}
 	
 	// Execute the command list
@@ -155,10 +165,9 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 	
 	// Synchronize the Level Zero queue to ensure all operations complete
-	// This is critical for proper ordering with subsequent SYCL operations
 	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
 	
-	// Clean up Level Zero resources
+	// Clean up/Destroy Level Zero resources
 	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 	zeEventDestroy(ze_event);
 	zeEventPoolDestroy(ze_event_pool);
@@ -176,9 +185,11 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
 	// Use dispatch_nd_region_copy to handle all layout combinations
 	dispatch_nd_region_copy(
 	    source_base, dest_base, source_layout, dest_layout, copy_region, elem_size,
+		// box path
 	    [&queue, elem_size, &last_event](const void* const source, void* const dest, const box<3>& source_box, const box<3>& dest_box, const box<3>& copy_box) {
 		    nd_copy_box_level_zero(queue, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
+		// linear path
 	    [&queue, &last_event](const void* const source, void* const dest, size_t size_bytes) {
 		    CELERITY_TRACE("Level-Zero backend: linear copy {} bytes", size_bytes);
 		    
@@ -203,7 +214,7 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
 		    // This is critical for proper ordering with subsequent SYCL operations
 		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
 		    
-		    // Clean up Level Zero resources
+			// Clean up/Destroy Level Zero resources
 		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 		    zeEventDestroy(ze_event);
 		    zeEventPoolDestroy(ze_event_pool);
@@ -231,6 +242,7 @@ sycl_level_zero_backend::sycl_level_zero_backend(const std::vector<sycl::device>
 	
 	// Query and enable peer-to-peer access between devices
 	// Level Zero devices on the same driver can typically access each other's memory
+	// Not sure if Possible but could be so we test
 	for(device_id i = 0; i < devices.size(); ++i) {
 		for(device_id j = i + 1; j < devices.size(); ++j) {
 			try {
