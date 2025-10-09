@@ -145,7 +145,7 @@ bool initialize(const runtime_configuration& cfg) {
 			// to the ones next to it in this sequence, so that communication between them is fast
 			selected_core_ids = get_available_sequential_cores(g_state.available_cores, total_threads, cfg.standard_core_start_id);
 			if(selected_core_ids.empty()) {
-				CELERITY_INFO("Insufficient logical cores available for thread pinning (required {} starting from {}, {} available), disabling pinning."
+				CELERITY_WARN("Insufficient logical cores available for thread pinning (required {} starting from {}, {} available), disabling pinning."
 				              " Performance may be negatively impacted.", //
 				    total_threads, cfg.standard_core_start_id, CPU_COUNT(&g_state.available_cores));
 			}
