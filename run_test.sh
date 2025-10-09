@@ -61,7 +61,7 @@ done
 
 # -------- logging --------
 ts="$(date +%Y%m%d_%H%M%S)"
-logdir="${LOG_DIR:-$PWD/build_test_logs}"
+logdir="${LOG_DIR:-$PWD/test_logs}"
 mkdir -p "$logdir"
 runlog="$logdir/run_${ts}.log"
 exec > >(tee -a "$runlog") 2>&1
