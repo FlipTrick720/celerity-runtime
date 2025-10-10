@@ -16,6 +16,7 @@ Quick guide to clone, build, and test the Celerity runtime with oneAPI Level-Zer
 
 ```bash
 git clone https://github.com/celerity/celerity-runtime.git
+git checkout optimized-setup-test
 cd celerity-runtime
 ```
 
