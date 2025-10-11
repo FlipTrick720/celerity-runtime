@@ -6,6 +6,7 @@ build-*
 !build_celerity.sh
 !build_and_test.sh
 !build_stress_test.sh
+!build_stress_v2.sh
 install
 .cache/
 .vs/

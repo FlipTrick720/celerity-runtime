@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-# Build script for standalone Level Zero event pool stress test
 
 set -e
 
 echo "=== Building Level Zero Event Pool Stress Test ==="
 
-# Source oneAPI environment
 if [ -f /opt/intel/oneapi/setvars.sh ]; then
-    echo "Sourcing oneAPI environment..."
     source /opt/intel/oneapi/setvars.sh
 fi
 
-# Compile
 echo "Compiling x_level_zero_pool_stress_tests.cc..."
 icpx -fsycl -fsycl-targets=spir64_gen \
      -Xsycl-target-backend=spir64_gen "-device dg2" \
@@ -19,12 +15,14 @@ icpx -fsycl -fsycl-targets=spir64_gen \
      -I../vendor/matchbox/include \
      -std=c++20 \
      -O2 \
-     -o level_zero_pool_stress \
+     -o stress_v1 \
      x_level_zero_pool_stress_tests.cc \
      -lze_loader
 
-echo "✓ Build successful: ./level_zero_pool_stress"
+chmod +x stress_v1
+
+echo "✓ Build successful: ./stress_v1"
 echo ""
 echo "Run:"
 
-SYCL_DEVICE_FILTER=level_zero:gpu ./level_zero_pool_stress
+SYCL_DEVICE_FILTER=level_zero:gpu ./stress_v1
