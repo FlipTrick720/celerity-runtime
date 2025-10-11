@@ -237,8 +237,9 @@ void nd_copy_box_level_zero(sycl::queue& queue, event_pool_manager& pool_mgr, co
 	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
 	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 	
-	// Synchronize the Level Zero queue to ensure all operations complete
-	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+	// Wait for the Level Zero event to complete before destroying the command list
+	// This ensures the copy operation finishes, but doesn't block other operations on the queue
+	ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 	
 	// Clean up command list (event is returned to pool automatically via RAII)
 	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
@@ -281,9 +282,9 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, event_pool_manager& po
 		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
 		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 		    
-		    // Synchronize the Level Zero queue to ensure all operations complete
-		    // This is critical for proper ordering with subsequent SYCL operations
-		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+		    // Wait for the Level Zero event to complete before destroying the command list
+		    // This ensures the copy operation finishes, but doesn't block other operations on the queue
+		    ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 		    
 		    // Clean up command list (event is returned to pool automatically via RAII)
 		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
