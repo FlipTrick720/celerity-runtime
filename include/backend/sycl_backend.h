@@ -164,6 +164,7 @@ class sycl_cuda_backend final : public sycl_backend {
 class sycl_level_zero_backend final : public sycl_backend {
   public:
 	sycl_level_zero_backend(const std::vector<sycl::device>& devices, const sycl_backend::configuration& config);
+	~sycl_level_zero_backend();
 
 	async_event enqueue_device_copy(device_id device, size_t device_lane, const void* const source_base, void* const dest_base,
 	    const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size) override;
