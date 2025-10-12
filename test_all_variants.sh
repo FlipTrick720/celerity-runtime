@@ -11,7 +11,7 @@ echo ""
 
 # Ensure test scripts are executable
 echo "Setting execute permissions on test scripts..."
-chmod +x test/stress_v1.sh test/stress_v2.sh test/l0_microbench.sh
+chmod +x test/stress_v1.sh test/stress_v2.sh test/l0_microbench.sh build_celerity.sh run_test.sh
 
 # Create results directory
 RESULTS_DIR="variant_test_results_$(date +%Y%m%d_%H%M%S)"
@@ -54,7 +54,15 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     fi
     echo "Build successful!"
     
-    # Run tests
+    # Run run_test
+    echo "Running all_tests..."
+    if ./run_test.sh --profile test  > "../$RESULTS_DIR/${variant}_all_tests.txt" 2>&1; then
+        echo "✓ all_tests complete"
+    else
+        echo "✗ all_tests failed"
+    fi
+
+    # Run bench
     echo "Running stress test v1..."
     cd test
     if ./stress_v1.sh > "../$RESULTS_DIR/${variant}_stress_v1.txt" 2>&1; then
