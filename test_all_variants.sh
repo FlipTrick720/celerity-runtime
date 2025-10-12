@@ -54,15 +54,15 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     fi
     echo "Build successful!"
     
-    # Run run_test
+    # Run run_test (full test suite for correctness verification)
     echo "Running all_tests..."
-    if ./run_test.sh --profile test  > "../$RESULTS_DIR/${variant}_all_tests.txt" 2>&1; then
+    if ./run_test.sh --profile test > "$RESULTS_DIR/${variant}_all_tests.txt" 2>&1; then
         echo "✓ all_tests complete"
     else
         echo "✗ all_tests failed"
     fi
 
-    # Run bench
+    # Run performance benchmarks
     echo "Running stress test v1..."
     cd test
     if ./stress_v1.sh > "../$RESULTS_DIR/${variant}_stress_v1.txt" 2>&1; then
