@@ -19,17 +19,24 @@ mkdir -p "$RESULTS_DIR"
 echo "Results will be saved to: $RESULTS_DIR"
 echo ""
 
-# Backup original
-echo "Backing up original backend..."
+# Backup originals
+echo "Backing up original backend files..."
 cp src/backend/sycl_level_zero_backend.cc "$RESULTS_DIR/sycl_level_zero_backend_original.cc.backup"
+cp include/backend/sycl_backend.h "$RESULTS_DIR/sycl_backend_original.h.backup"
 
-# Define variants
-declare -A VARIANTS
-VARIANTS[baseline]="src/backend/sycl_level_zero_backend.cc"
-VARIANTS[variant1]="src/backend/sycl_level_zero_backend copy 1.cc"
-VARIANTS[variant2]="src/backend/sycl_level_zero_backend copy 2.cc"
-VARIANTS[variant3]="src/backend/sycl_level_zero_backend copy 3.cc"
-VARIANTS[variant4]="src/backend/sycl_level_zero_backend copy 4.cc"
+# Define variants (both .cc and .h files)
+declare -A VARIANT_CC
+declare -A VARIANT_H
+VARIANT_CC[baseline]="src/backend/sycl_level_zero_backend.cc"
+VARIANT_H[baseline]="include/backend/sycl_backend.h"
+VARIANT_CC[variant1]="src/backend/sycl_level_zero_backend copy 1.cc"
+VARIANT_H[variant1]="include/backend/sycl_backend copy 1.h"
+VARIANT_CC[variant2]="src/backend/sycl_level_zero_backend copy 2.cc"
+VARIANT_H[variant2]="include/backend/sycl_backend copy 1.h"
+VARIANT_CC[variant3]="src/backend/sycl_level_zero_backend copy 3.cc"
+VARIANT_H[variant3]="include/backend/sycl_backend copy 1.h"
+VARIANT_CC[variant4]="src/backend/sycl_level_zero_backend copy 4.cc"
+VARIANT_H[variant4]="include/backend/sycl_backend copy 1.h"
 
 # Test each variant
 for variant in baseline variant1 variant2 variant3 variant4; do
@@ -37,12 +44,15 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     echo "Testing: $variant"
     echo "========================================="
     
-    source_file="${VARIANTS[$variant]}"
+    source_cc="${VARIANT_CC[$variant]}"
+    source_h="${VARIANT_H[$variant]}"
     
-    # Copy source (skip for baseline on first run)
+    # Copy source files
     if [ "$variant" != "baseline" ] || [ ! -f "src/backend/sycl_level_zero_backend.cc" ]; then
-        echo "Copying $source_file to src/backend/sycl_level_zero_backend.cc"
-        cp "$source_file" src/backend/sycl_level_zero_backend.cc
+        echo "Copying $source_cc to src/backend/sycl_level_zero_backend.cc"
+        cp "$source_cc" src/backend/sycl_level_zero_backend.cc
+        echo "Copying $source_h to include/backend/sycl_backend.h"
+        cp "$source_h" include/backend/sycl_backend.h
     fi
     
     # Build
@@ -93,9 +103,10 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     sleep 2
 done
 
-# Restore original
-echo "Restoring original backend..."
+# Restore originals
+echo "Restoring original backend files..."
 cp "$RESULTS_DIR/sycl_level_zero_backend_original.cc.backup" src/backend/sycl_level_zero_backend.cc
+cp "$RESULTS_DIR/sycl_backend_original.h.backup" include/backend/sycl_backend.h
 
 echo "========================================="
 echo "All tests complete!"
