@@ -1,9 +1,8 @@
 // celerity_l0_microbench.cpp
 // SYCL micro-benchmark for H2D/D2H/D2D copies across sizes and modes.
-// Build:  dpcpp -O3 -std=c++17 celerity_l0_microbench.cpp -o l0bench
+// Build:  icpx -fsycl -O3 -std=c++17 celerity_l0_microbench.cpp -o l0bench
 // Run:    SYCL_DEVICE_FILTER=level_zero:gpu ./l0bench --csv results.csv
 
-#include <sycl/sycl.hpp>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -12,6 +11,8 @@
 #include <string>
 #include <optional>
 #include <algorithm>
+#include <cmath>
+#include <sycl/sycl.hpp>
 
 using clk = std::chrono::high_resolution_clock;
 using ns  = std::chrono::nanoseconds;
@@ -120,8 +121,7 @@ int main(int argc, char** argv) {
     std::cout << "Device: " << name << "\n";
     std::cout << "Backend: " << (be==sycl::backend::ext_oneapi_level_zero ? "ext_oneapi_level_zero" :
                                   be==sycl::backend::ext_oneapi_cuda ? "ext_oneapi_cuda" :
-                                  be==sycl::backend::opencl ? "opencl" :
-                                  be==sycl::backend::native_cpu ? "native_cpu" : "other")
+                                  be==sycl::backend::opencl ? "opencl" : "other")
               << "\n";
     std::cout << "Mode: " << (args.batch ? "batch" : "sync-each") << ", HostPinned: " << (args.pin_host?"yes":"no") << "\n\n";
   }
