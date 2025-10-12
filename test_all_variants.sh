@@ -9,6 +9,10 @@ echo "Level Zero Backend Variant Testing"
 echo "========================================="
 echo ""
 
+# Ensure test scripts are executable
+echo "Setting execute permissions on test scripts..."
+chmod +x test/stress_v1.sh test/stress_v2.sh test/l0_microbench.sh
+
 # Create results directory
 RESULTS_DIR="variant_test_results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"

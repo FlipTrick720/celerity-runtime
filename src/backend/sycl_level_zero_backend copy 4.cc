@@ -1,9 +1,6 @@
-// VARIANT 4: Event Pooling + Async Recycling
-// - Persistent event pool per device (1024 events)
-// - Persistent command list pool per device
-// - NO zeCommandQueueSynchronize() in hotpath!
-// - Async event recycling via SYCL host_task
-// - Should eliminate synchronization bottleneck
+// VARIANT 4: Async Recycling
+// Goal: Remove synchronization from hotpath by recycling resources asynchronously
+// Implementation: Don't sync after each copy, recycle resources when event completes
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -18,6 +15,7 @@
 
 #include <cassert>
 #include <cstddef>
+#include <deque>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -35,179 +33,156 @@ static inline void ze_check(ze_result_t result, const char* where) {
 	}
 }
 
-// Event pool manager
-class event_pool_manager {
-  public:
-	event_pool_manager(ze_context_handle_t context, ze_device_handle_t device, size_t pool_size = 1024)
-	    : m_context(context), m_device(device), m_pool_size(pool_size) {
-		create_pool();
-		CELERITY_DEBUG("[V4] Level-Zero event pool created with {} events", pool_size);
-	}
+// ============================================================================
+// VARIANT 4: Async Resource Recycling
+// ============================================================================
 
-	~event_pool_manager() {
-		if(m_pool) {
-			zeEventPoolDestroy(m_pool);
-		}
-	}
+struct pending_resources {
+	ze_event_handle_t event;
+	ze_command_list_handle_t cmdlist;
+};
 
-	ze_event_handle_t acquire_event() {
-		std::lock_guard<std::mutex> lock(m_mutex);
-		
-		if(!m_free_events.empty()) {
-			auto event = m_free_events.back();
-			m_free_events.pop_back();
-			zeEventHostReset(event);
-			return event;
-		}
-		
-		if(m_next_index < m_pool_size) {
-			ze_event_desc_t event_desc = {};
-			event_desc.stype = ZE_STRUCTURE_TYPE_EVENT_DESC;
-			event_desc.index = m_next_index++;
-			event_desc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
-			event_desc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
-			
-			ze_event_handle_t event = nullptr;
-			ze_check(zeEventCreate(m_pool, &event_desc, &event), "zeEventCreate");
-			return event;
-		}
-		
-		CELERITY_WARN("[V4] Event pool exhausted (size={}), creating larger pool", m_pool_size);
-		grow_pool();
-		return acquire_event();
-	}
-
-	void release_event(ze_event_handle_t event) {
-		std::lock_guard<std::mutex> lock(m_mutex);
-		m_free_events.push_back(event);
-	}
-
-  private:
-	void create_pool() {
+class async_resource_pool {
+public:
+	async_resource_pool(ze_context_handle_t ctx, ze_device_handle_t dev) : m_ctx(ctx), m_dev(dev) {
+		// Create event pool
 		ze_event_pool_desc_t pool_desc = {};
 		pool_desc.stype = ZE_STRUCTURE_TYPE_EVENT_POOL_DESC;
 		pool_desc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
-		pool_desc.count = m_pool_size;
+		pool_desc.count = 1024;
 		
-		ze_check(zeEventPoolCreate(m_context, &pool_desc, 1, &m_device, &m_pool), "zeEventPoolCreate");
+		ze_check(zeEventPoolCreate(m_ctx, &pool_desc, 1, &m_dev, &m_event_pool), "zeEventPoolCreate");
+		CELERITY_DEBUG("[V4] Async resource pool created with 1024 events");
 	}
-
-	void grow_pool() {
+	
+	~async_resource_pool() {
+		// Clean up all pending resources
+		recycle_completed();
+		
+		// Clean up free resources
 		for(auto event : m_free_events) {
 			zeEventDestroy(event);
 		}
-		m_free_events.clear();
-		
-		if(m_pool) {
-			zeEventPoolDestroy(m_pool);
+		for(auto cl : m_free_cmdlists) {
+			zeCommandListDestroy(cl);
 		}
 		
-		m_pool_size *= 2;
-		m_next_index = 0;
-		create_pool();
+		if(m_event_pool) {
+			zeEventPoolDestroy(m_event_pool);
+		}
+	}
+	
+	std::pair<ze_event_handle_t, ze_command_list_handle_t> get_resources() {
+		std::lock_guard<std::mutex> lock(m_mutex);
+		
+		// First, recycle any completed operations
+		recycle_completed_locked();
+		
+		// Get event
+		ze_event_handle_t event = nullptr;
+		if(!m_free_events.empty()) {
+			event = m_free_events.back();
+			m_free_events.pop_back();
+			zeEventHostReset(event);
+		} else if(m_next_event_index < 1024) {
+			ze_event_desc_t event_desc = {};
+			event_desc.stype = ZE_STRUCTURE_TYPE_EVENT_DESC;
+			event_desc.index = m_next_event_index++;
+			event_desc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+			event_desc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+			
+			ze_check(zeEventCreate(m_event_pool, &event_desc, &event), "zeEventCreate");
+		} else {
+			utils::panic("[V4] Event pool exhausted");
+		}
+		
+		// Get command list
+		ze_command_list_handle_t cmdlist = nullptr;
+		if(!m_free_cmdlists.empty()) {
+			cmdlist = m_free_cmdlists.back();
+			m_free_cmdlists.pop_back();
+			zeCommandListReset(cmdlist);
+		} else {
+			ze_command_list_desc_t desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
+			ze_check(zeCommandListCreate(m_ctx, m_dev, &desc, &cmdlist), "zeCommandListCreate");
+		}
+		
+		return {event, cmdlist};
+	}
+	
+	void submit_async(ze_event_handle_t event, ze_command_list_handle_t cmdlist) {
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_pending.push_back({event, cmdlist});
+	}
+	
+	void recycle_completed() {
+		std::lock_guard<std::mutex> lock(m_mutex);
+		recycle_completed_locked();
 	}
 
-	ze_context_handle_t m_context;
-	ze_device_handle_t m_device;
-	ze_event_pool_handle_t m_pool = nullptr;
-	size_t m_pool_size;
-	size_t m_next_index = 0;
+private:
+	void recycle_completed_locked() {
+		// Check pending resources and recycle completed ones
+		auto it = m_pending.begin();
+		while(it != m_pending.end()) {
+			const auto result = zeEventQueryStatus(it->event);
+			if(result == ZE_RESULT_SUCCESS) {
+				// Operation completed - recycle resources
+				m_free_events.push_back(it->event);
+				m_free_cmdlists.push_back(it->cmdlist);
+				it = m_pending.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	ze_context_handle_t m_ctx;
+	ze_device_handle_t m_dev;
+	ze_event_pool_handle_t m_event_pool = nullptr;
+	size_t m_next_event_index = 0;
+	
 	std::vector<ze_event_handle_t> m_free_events;
+	std::vector<ze_command_list_handle_t> m_free_cmdlists;
+	std::deque<pending_resources> m_pending;
 	std::mutex m_mutex;
 };
 
-// Command list pool manager
-struct command_list_pool {
-	ze_context_handle_t ctx{};
-	ze_device_handle_t dev{};
-	std::mutex mtx;
-	std::vector<ze_command_list_handle_t> free_lists;
-	
-	command_list_pool(ze_context_handle_t c, ze_device_handle_t d) : ctx(c), dev(d) {
-		CELERITY_DEBUG("[V4] Level-Zero command list pool initialized");
-	}
-	
-	ze_command_list_handle_t acquire() {
-		std::scoped_lock lk(mtx);
-		if(!free_lists.empty()) {
-			auto cl = free_lists.back();
-			free_lists.pop_back();
-			ze_check(zeCommandListReset(cl), "zeCommandListReset");
-			return cl;
-		}
-		ze_command_list_desc_t desc{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
-		ze_command_list_handle_t cl = nullptr;
-		ze_check(zeCommandListCreate(ctx, dev, &desc, &cl), "zeCommandListCreate");
-		return cl;
-	}
-	
-	void release(ze_command_list_handle_t cl) {
-		std::scoped_lock lk(mtx);
-		free_lists.push_back(cl);
-	}
-	
-	~command_list_pool() {
-		std::scoped_lock lk(mtx);
-		for(auto cl : free_lists) {
-			zeCommandListDestroy(cl);
-		}
-		free_lists.clear();
-	}
-};
+// Global pools
+static std::vector<std::unique_ptr<async_resource_pool>> g_resource_pools;
+static std::mutex g_pools_mutex;
 
-// RAII wrappers
-class pooled_event {
-  public:
-	pooled_event(event_pool_manager& pool) : m_pool(&pool), m_event(pool.acquire_event()) {}
+void initialize_pools(const std::vector<sycl::device>& devices) {
+	std::lock_guard<std::mutex> lock(g_pools_mutex);
+	g_resource_pools.clear();
 	
-	~pooled_event() {
-		if(m_event && m_pool) {
-			m_pool->release_event(m_event);
-		}
-	}
-
-	pooled_event(const pooled_event&) = delete;
-	pooled_event& operator=(const pooled_event&) = delete;
-	
-	pooled_event(pooled_event&& other) noexcept : m_pool(other.m_pool), m_event(other.m_event) {
-		other.m_pool = nullptr;
-		other.m_event = nullptr;
-	}
-
-	ze_event_handle_t get() const { return m_event; }
-	
-	ze_event_handle_t release() {
-		auto evt = m_event;
-		m_event = nullptr;
-		m_pool = nullptr;
-		return evt;
-	}
-
-  private:
-	event_pool_manager* m_pool;
-	ze_event_handle_t m_event;
-};
-
-struct pooled_cmd_list {
-	command_list_pool* pool{};
-	ze_command_list_handle_t cl{};
-	
-	explicit pooled_cmd_list(command_list_pool& p) : pool(&p), cl(p.acquire()) {}
-	
-	~pooled_cmd_list() {
-		if(pool && cl) pool->release(cl);
+	for(const auto& device : devices) {
+		auto ze_ctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device.get_platform().ext_oneapi_get_default_context());
+		auto ze_dev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device);
+		g_resource_pools.push_back(std::make_unique<async_resource_pool>(ze_ctx, ze_dev));
 	}
 	
-	pooled_cmd_list(const pooled_cmd_list&) = delete;
-	pooled_cmd_list& operator=(const pooled_cmd_list&) = delete;
-	
-	ze_command_list_handle_t get() const { return cl; }
-};
+	CELERITY_DEBUG("[V4] Initialized {} async resource pools", devices.size());
+}
 
-void nd_copy_box_level_zero(sycl::queue& queue, event_pool_manager& event_pool, command_list_pool& cmdlist_pool,
-    const void* const source_base, void* const dest_base, const box<3>& source_box, const box<3>& dest_box,
-    const box<3>& copy_box, const size_t elem_size, sycl::event& last_event) //
-{
+void cleanup_pools() {
+	std::lock_guard<std::mutex> lock(g_pools_mutex);
+	g_resource_pools.clear();
+	CELERITY_DEBUG("[V4] Cleaned up pools");
+}
+
+async_resource_pool& get_resource_pool(device_id device) {
+	std::lock_guard<std::mutex> lock(g_pools_mutex);
+	return *g_resource_pools[device];
+}
+
+// ============================================================================
+// Copy Functions (async, no sync in hotpath)
+// ============================================================================
+
+void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* const source_base, void* const dest_base,
+    const box<3>& source_box, const box<3>& dest_box, const box<3>& copy_box, const size_t elem_size, sycl::event& last_event) {
+	
 	assert(source_box.covers(copy_box));
 	assert(dest_box.covers(copy_box));
 	
@@ -224,14 +199,15 @@ void nd_copy_box_level_zero(sycl::queue& queue, event_pool_manager& event_pool, 
 	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
 	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
 	
-	pooled_event ze_event(event_pool);
-	pooled_cmd_list cmd_list(cmdlist_pool);
+	// Get resources from pool
+	auto& pool = get_resource_pool(device);
+	auto [ze_event, cmd_list] = pool.get_resources();
 	
 	if(layout.num_complex_strides == 0) {
 		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
 		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
-		ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dst_ptr, src_ptr, layout.contiguous_size, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
-		CELERITY_TRACE("[V4] Level-Zero backend: contiguous copy {} bytes", layout.contiguous_size);
+		ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		CELERITY_TRACE("[V4] Level-Zero backend: contiguous copy {} bytes (async)", layout.contiguous_size);
 	} else if(layout.num_complex_strides == 1) {
 		const auto& stride = layout.strides[0];
 		const size_t width = layout.contiguous_size;
@@ -245,11 +221,11 @@ void nd_copy_box_level_zero(sycl::queue& queue, event_pool_manager& event_pool, 
 		ze_copy_region_t src_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
 		ze_copy_region_t dst_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
 		
-		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list.get(), dst_ptr, &dst_region, dst_pitch, 0,
-		                                             src_ptr, &src_region, src_pitch, 0, ze_event.get(), 0, nullptr), 
+		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list, dst_ptr, &dst_region, dst_pitch, 0,
+		                                             src_ptr, &src_region, src_pitch, 0, ze_event, 0, nullptr), 
 		         "zeCommandListAppendMemoryCopyRegion");
 		
-		CELERITY_TRACE("[V4] Level-Zero backend: 2D copy {}x{} bytes", width, height);
+		CELERITY_TRACE("[V4] Level-Zero backend: 2D copy {}x{} bytes (async)", width, height);
 	} else {
 		std::vector<std::tuple<size_t, size_t, size_t>> chunks;
 		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
@@ -262,74 +238,48 @@ void nd_copy_box_level_zero(sycl::queue& queue, event_pool_manager& event_pool, 
 			void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
 			
 			const bool is_last = (i == chunks.size() - 1);
-			ze_event_handle_t event_to_use = is_last ? ze_event.get() : nullptr;
+			ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
 			
-			ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
+			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
 		}
 		
-		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks", chunks.size());
+		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks (async)", chunks.size());
 	}
 	
-	// Execute command list (NO HOST SYNC!)
-	ze_check(zeCommandListClose(cmd_list.get()), "zeCommandListClose");
-	auto cmd_list_handle = cmd_list.get();
-	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list_handle, nullptr), "zeCommandQueueExecuteCommandLists");
+	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 	
-	// Release Level Zero event from RAII - will be recycled by host_task
-	auto ze_event_handle = ze_event.release();
+	// KEY DIFFERENCE: NO SYNC HERE! Submit resources for async recycling
+	pool.submit_async(ze_event, cmd_list);
 	
-	// Submit host_task to recycle event asynchronously
-	queue.submit([&event_pool, ze_event_handle](sycl::handler& h) {
-		h.host_task([&event_pool, ze_event_handle]() {
-			// This runs AFTER copy completes, outside hotpath!
-			ze_check(zeEventHostSynchronize(ze_event_handle, UINT64_MAX), "zeEventHostSynchronize");
-			ze_check(zeEventHostReset(ze_event_handle), "zeEventHostReset");
-			event_pool.release_event(ze_event_handle);
-		});
-	});
-	
-	// Create SYCL barrier event for dependency tracking
 	last_event = queue.ext_oneapi_submit_barrier();
-	
-	// Command list automatically returned to pool via RAII
 }
 
-async_event nd_copy_device_level_zero(sycl::queue& queue, event_pool_manager& event_pool, command_list_pool& cmdlist_pool,
-    const void* const source_base, void* const dest_base, const region_layout& source_layout, const region_layout& dest_layout,
-    const region<3>& copy_region, const size_t elem_size, bool enable_profiling) //
-{
+async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, const void* const source_base, void* const dest_base,
+    const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size, bool enable_profiling) {
+	
 	sycl::event last_event;
 	
 	dispatch_nd_region_copy(
 	    source_base, dest_base, source_layout, dest_layout, copy_region, elem_size,
-	    [&queue, &event_pool, &cmdlist_pool, elem_size, &last_event](const void* const source, void* const dest, const box<3>& source_box, const box<3>& dest_box, const box<3>& copy_box) {
-		    nd_copy_box_level_zero(queue, event_pool, cmdlist_pool, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
+	    [&queue, device, elem_size, &last_event](const void* const source, void* const dest, const box<3>& source_box, const box<3>& dest_box, const box<3>& copy_box) {
+		    nd_copy_box_level_zero(queue, device, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
-	    [&queue, &event_pool, &cmdlist_pool, &last_event](const void* const source, void* const dest, size_t size_bytes) {
-		    CELERITY_TRACE("[V4] Level-Zero backend: linear copy {} bytes", size_bytes);
+	    [&queue, device, &last_event](const void* const source, void* const dest, size_t size_bytes) {
+		    CELERITY_TRACE("[V4] Level-Zero backend: linear copy {} bytes (async)", size_bytes);
 		    
 		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
 		    auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
 		    
-		    pooled_event ze_event(event_pool);
-		    pooled_cmd_list cmd_list(cmdlist_pool);
+		    auto& pool = get_resource_pool(device);
+		    auto [ze_event, cmd_list] = pool.get_resources();
 		    
-		    ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dest, source, size_bytes, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
-		    ze_check(zeCommandListClose(cmd_list.get()), "zeCommandListClose");
-		    auto cmd_list_handle = cmd_list.get();
-		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list_handle, nullptr), "zeCommandQueueExecuteCommandLists");
+		    ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 		    
-		    // Release event from RAII
-		    auto ze_event_handle = ze_event.release();
-		    
-		    // Async recycling
-		    queue.submit([&event_pool, ze_event_handle](sycl::handler& h) {
-		        h.host_task([&event_pool, ze_event_handle]() {
-		            ze_check(zeEventHostSynchronize(ze_event_handle, UINT64_MAX), "zeEventHostSynchronize");
-		            ze_check(zeEventHostReset(ze_event_handle), "zeEventHostReset");
-		            event_pool.release_event(ze_event_handle);
-		        });
-		    });
+		    // NO SYNC - submit for async recycling
+		    pool.submit_async(ze_event, cmd_list);
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
@@ -342,26 +292,11 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, event_pool_manager& ev
 
 namespace celerity::detail {
 
-struct sycl_level_zero_backend::impl {
-	struct per_device_state {
-		std::unique_ptr<level_zero_backend_detail::event_pool_manager> ev_pool;
-		std::unique_ptr<level_zero_backend_detail::command_list_pool> cl_pool;
-	};
-	std::vector<per_device_state> devs;
-};
-
 sycl_level_zero_backend::sycl_level_zero_backend(const std::vector<sycl::device>& devices, const sycl_backend::configuration& config)
-    : sycl_backend(devices, config), m_impl(new impl()) {
+    : sycl_backend(devices, config) {
 	CELERITY_DEBUG("[V4] Level-Zero backend initialized with {} device(s)", devices.size());
 	
-	for(const auto& device : devices) {
-		impl::per_device_state st;
-		auto ze_ctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device.get_platform().ext_oneapi_get_default_context());
-		auto ze_dev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device);
-		st.ev_pool = std::make_unique<level_zero_backend_detail::event_pool_manager>(ze_ctx, ze_dev, 1024);
-		st.cl_pool = std::make_unique<level_zero_backend_detail::command_list_pool>(ze_ctx, ze_dev);
-		m_impl->devs.push_back(std::move(st));
-	}
+	level_zero_backend_detail::initialize_pools(devices);
 	
 	for(device_id i = 0; i < devices.size(); ++i) {
 		for(device_id j = i + 1; j < devices.size(); ++j) {
@@ -389,15 +324,16 @@ sycl_level_zero_backend::sycl_level_zero_backend(const std::vector<sycl::device>
 	}
 }
 
-sycl_level_zero_backend::~sycl_level_zero_backend() = default;
+sycl_level_zero_backend::~sycl_level_zero_backend() {
+	level_zero_backend_detail::cleanup_pools();
+}
 
 async_event sycl_level_zero_backend::enqueue_device_copy(device_id device, size_t device_lane, const void* const source_base, void* const dest_base,
-    const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size) //
-{
+    const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size) {
+	
 	return enqueue_device_work(device, device_lane, [=, this](sycl::queue& queue) {
-		auto& st = m_impl->devs[device];
 		return level_zero_backend_detail::nd_copy_device_level_zero(
-		    queue, *st.ev_pool, *st.cl_pool, source_base, dest_base, source_layout, dest_layout, copy_region, elem_size, is_profiling_enabled());
+		    queue, device, source_base, dest_base, source_layout, dest_layout, copy_region, elem_size, is_profiling_enabled());
 	});
 }
 
