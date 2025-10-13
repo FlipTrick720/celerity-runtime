@@ -14,7 +14,7 @@ echo "Setting execute permissions on test scripts..."
 chmod +x test/stress_v1.sh test/stress_v2.sh test/l0_microbench.sh build_celerity.sh run_test.sh
 
 # Create results directory
-RESULTS_DIR="variant_test_results_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="variant_test_results_v2_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 echo "Results will be saved to: $RESULTS_DIR"
 echo ""

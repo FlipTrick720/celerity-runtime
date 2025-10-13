@@ -1,6 +1,7 @@
-// VARIANT 4: Async Recycling
-// Goal: Remove synchronization from hotpath by recycling resources asynchronously
-// Implementation: Don't sync after each copy, recycle resources when event completes
+// VARIANT 4: Immediate Command Lists + Persistent Pool
+// Goal: Use zeCommandListCreateImmediate (persistent per device)
+// Implementation: Immediate command lists with persistent event pool
+// Hypothesis: Significantly less host overhead per submit
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -34,150 +35,196 @@ static inline void ze_check(ze_result_t result, const char* where) {
 }
 
 // ============================================================================
-// VARIANT 4: Async Resource Recycling
+// VARIANT 4: Immediate Command Lists + Persistent Pool
 // ============================================================================
 
-struct pending_resources {
-	ze_event_handle_t event;
-	ze_command_list_handle_t cmdlist;
-};
-
-class async_resource_pool {
+class immediate_cmdlist_pool {
 public:
-	async_resource_pool(ze_context_handle_t ctx, ze_device_handle_t dev) : m_ctx(ctx), m_dev(dev) {
-		// Create event pool
+	immediate_cmdlist_pool(ze_context_handle_t ctx, ze_device_handle_t dev) : m_ctx(ctx), m_dev(dev) {
+		// Create persistent event pool
 		ze_event_pool_desc_t pool_desc = {};
 		pool_desc.stype = ZE_STRUCTURE_TYPE_EVENT_POOL_DESC;
 		pool_desc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
 		pool_desc.count = 1024;
 		
 		ze_check(zeEventPoolCreate(m_ctx, &pool_desc, 1, &m_dev, &m_event_pool), "zeEventPoolCreate");
-		CELERITY_DEBUG("[V4] Async resource pool created with 1024 events");
+		CELERITY_DEBUG("[V4] Immediate command list pool created with persistent event pool (1024 events)");
 	}
 	
-	~async_resource_pool() {
-		// Clean up all pending resources
-		recycle_completed();
+	~immediate_cmdlist_pool() {
+		std::lock_guard<std::mutex> lock(m_mutex);
 		
-		// Clean up free resources
-		for(auto event : m_free_events) {
+		// Destroy all events
+		for(auto event : m_all_events) {
 			zeEventDestroy(event);
 		}
-		for(auto cl : m_free_cmdlists) {
+		
+		// Destroy all immediate command lists
+		for(auto cl : m_all_cmdlists) {
 			zeCommandListDestroy(cl);
 		}
 		
 		if(m_event_pool) {
 			zeEventPoolDestroy(m_event_pool);
 		}
+		
+		CELERITY_DEBUG("[V4] Destroyed {} events and {} immediate command lists", 
+		               m_all_events.size(), m_all_cmdlists.size());
 	}
 	
-	std::pair<ze_event_handle_t, ze_command_list_handle_t> get_resources() {
+	ze_event_handle_t get_event() {
 		std::lock_guard<std::mutex> lock(m_mutex);
 		
-		// First, recycle any completed operations
-		recycle_completed_locked();
-		
-		// Get event
-		ze_event_handle_t event = nullptr;
+		// Try to reuse from free list
 		if(!m_free_events.empty()) {
-			event = m_free_events.back();
+			auto event = m_free_events.back();
 			m_free_events.pop_back();
 			zeEventHostReset(event);
-		} else if(m_next_event_index < 1024) {
+			return event;
+		}
+		
+		// Create new event if pool not exhausted
+		if(m_next_event_index < 1024) {
 			ze_event_desc_t event_desc = {};
 			event_desc.stype = ZE_STRUCTURE_TYPE_EVENT_DESC;
 			event_desc.index = m_next_event_index++;
 			event_desc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
 			event_desc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
 			
+			ze_event_handle_t event = nullptr;
 			ze_check(zeEventCreate(m_event_pool, &event_desc, &event), "zeEventCreate");
-		} else {
-			utils::panic("[V4] Event pool exhausted");
+			m_all_events.push_back(event);
+			return event;
 		}
 		
-		// Get command list
-		ze_command_list_handle_t cmdlist = nullptr;
+		utils::panic("[V4] Event pool exhausted");
+	}
+	
+	void return_event(ze_event_handle_t event) {
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_free_events.push_back(event);
+	}
+	
+	ze_command_list_handle_t get_immediate_cmdlist() {
+		std::lock_guard<std::mutex> lock(m_mutex);
+		
+		// Try to reuse from free list
 		if(!m_free_cmdlists.empty()) {
-			cmdlist = m_free_cmdlists.back();
+			auto cl = m_free_cmdlists.back();
 			m_free_cmdlists.pop_back();
-			zeCommandListReset(cmdlist);
-		} else {
-			ze_command_list_desc_t desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
-			ze_check(zeCommandListCreate(m_ctx, m_dev, &desc, &cmdlist), "zeCommandListCreate");
+			// Immediate command lists don't need reset
+			return cl;
 		}
 		
-		return {event, cmdlist};
+		// Create new immediate command list
+		ze_command_queue_desc_t queue_desc = {};
+		queue_desc.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+		queue_desc.ordinal = 0;
+		queue_desc.index = 0;
+		queue_desc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+		
+		ze_command_list_handle_t cl = nullptr;
+		ze_check(zeCommandListCreateImmediate(m_ctx, m_dev, &queue_desc, &cl), "zeCommandListCreateImmediate");
+		m_all_cmdlists.push_back(cl);
+		return cl;
 	}
 	
-	void submit_async(ze_event_handle_t event, ze_command_list_handle_t cmdlist) {
+	void return_immediate_cmdlist(ze_command_list_handle_t cl) {
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_pending.push_back({event, cmdlist});
-	}
-	
-	void recycle_completed() {
-		std::lock_guard<std::mutex> lock(m_mutex);
-		recycle_completed_locked();
+		m_free_cmdlists.push_back(cl);
 	}
 
 private:
-	void recycle_completed_locked() {
-		// Check pending resources and recycle completed ones
-		auto it = m_pending.begin();
-		while(it != m_pending.end()) {
-			const auto result = zeEventQueryStatus(it->event);
-			if(result == ZE_RESULT_SUCCESS) {
-				// Operation completed - recycle resources
-				m_free_events.push_back(it->event);
-				m_free_cmdlists.push_back(it->cmdlist);
-				it = m_pending.erase(it);
-			} else {
-				++it;
-			}
-		}
-	}
-
 	ze_context_handle_t m_ctx;
 	ze_device_handle_t m_dev;
 	ze_event_pool_handle_t m_event_pool = nullptr;
 	size_t m_next_event_index = 0;
 	
+	std::vector<ze_event_handle_t> m_all_events;
 	std::vector<ze_event_handle_t> m_free_events;
+	std::vector<ze_command_list_handle_t> m_all_cmdlists;
 	std::vector<ze_command_list_handle_t> m_free_cmdlists;
-	std::deque<pending_resources> m_pending;
 	std::mutex m_mutex;
 };
 
 // Global pools
-static std::vector<std::unique_ptr<async_resource_pool>> g_resource_pools;
+static std::vector<std::unique_ptr<immediate_cmdlist_pool>> g_immediate_pools;
 static std::mutex g_pools_mutex;
 
 void initialize_pools(const std::vector<sycl::device>& devices) {
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
-	g_resource_pools.clear();
+	g_immediate_pools.clear();
 	
 	for(const auto& device : devices) {
 		auto ze_ctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device.get_platform().ext_oneapi_get_default_context());
 		auto ze_dev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device);
-		g_resource_pools.push_back(std::make_unique<async_resource_pool>(ze_ctx, ze_dev));
+		g_immediate_pools.push_back(std::make_unique<immediate_cmdlist_pool>(ze_ctx, ze_dev));
 	}
 	
-	CELERITY_DEBUG("[V4] Initialized {} async resource pools", devices.size());
+	CELERITY_DEBUG("[V4] Initialized {} immediate command list pools", devices.size());
 }
 
 void cleanup_pools() {
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
-	g_resource_pools.clear();
+	g_immediate_pools.clear();
 	CELERITY_DEBUG("[V4] Cleaned up pools");
 }
 
-async_resource_pool& get_resource_pool(device_id device) {
+immediate_cmdlist_pool& get_immediate_pool(device_id device) {
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
-	return *g_resource_pools[device];
+	if(device >= g_immediate_pools.size()) {
+		utils::panic("[V4] Invalid device ID for immediate pool: {}", device);
+	}
+	return *g_immediate_pools[device];
 }
 
+// RAII wrappers
+class pooled_event {
+public:
+	pooled_event(device_id device) : m_device(device) {
+		m_event = get_immediate_pool(device).get_event();
+	}
+	
+	~pooled_event() {
+		if(m_event) {
+			get_immediate_pool(m_device).return_event(m_event);
+		}
+	}
+	
+	ze_event_handle_t get() const { return m_event; }
+	
+	pooled_event(const pooled_event&) = delete;
+	pooled_event& operator=(const pooled_event&) = delete;
+
+private:
+	device_id m_device;
+	ze_event_handle_t m_event = nullptr;
+};
+
+class pooled_immediate_cmdlist {
+public:
+	pooled_immediate_cmdlist(device_id device) : m_device(device) {
+		m_cmdlist = get_immediate_pool(device).get_immediate_cmdlist();
+	}
+	
+	~pooled_immediate_cmdlist() {
+		if(m_cmdlist) {
+			get_immediate_pool(m_device).return_immediate_cmdlist(m_cmdlist);
+		}
+	}
+	
+	ze_command_list_handle_t get() const { return m_cmdlist; }
+	
+	pooled_immediate_cmdlist(const pooled_immediate_cmdlist&) = delete;
+	pooled_immediate_cmdlist& operator=(const pooled_immediate_cmdlist&) = delete;
+
+private:
+	device_id m_device;
+	ze_command_list_handle_t m_cmdlist = nullptr;
+};
+
 // ============================================================================
-// Copy Functions (async, no sync in hotpath)
+// Copy Functions (using immediate command lists)
 // ============================================================================
 
 void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* const source_base, void* const dest_base,
@@ -199,15 +246,16 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
 	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
 	
-	// Get resources from pool
-	auto& pool = get_resource_pool(device);
-	auto [ze_event, cmd_list] = pool.get_resources();
+	// Use pooled event and immediate command list
+	pooled_event ze_event(device);
+	pooled_immediate_cmdlist cmd_list(device);
 	
 	if(layout.num_complex_strides == 0) {
 		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
 		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
-		ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
-		CELERITY_TRACE("[V4] Level-Zero backend: contiguous copy {} bytes (async)", layout.contiguous_size);
+		// Immediate command list - executes immediately, no close/execute needed
+		ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dst_ptr, src_ptr, layout.contiguous_size, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
+		CELERITY_TRACE("[V4] Level-Zero backend: contiguous copy {} bytes (immediate)", layout.contiguous_size);
 	} else if(layout.num_complex_strides == 1) {
 		const auto& stride = layout.strides[0];
 		const size_t width = layout.contiguous_size;
@@ -221,11 +269,11 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		ze_copy_region_t src_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
 		ze_copy_region_t dst_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
 		
-		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list, dst_ptr, &dst_region, dst_pitch, 0,
-		                                             src_ptr, &src_region, src_pitch, 0, ze_event, 0, nullptr), 
+		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list.get(), dst_ptr, &dst_region, dst_pitch, 0,
+		                                             src_ptr, &src_region, src_pitch, 0, ze_event.get(), 0, nullptr), 
 		         "zeCommandListAppendMemoryCopyRegion");
 		
-		CELERITY_TRACE("[V4] Level-Zero backend: 2D copy {}x{} bytes (async)", width, height);
+		CELERITY_TRACE("[V4] Level-Zero backend: 2D copy {}x{} bytes (immediate)", width, height);
 	} else {
 		std::vector<std::tuple<size_t, size_t, size_t>> chunks;
 		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
@@ -238,19 +286,16 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 			void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
 			
 			const bool is_last = (i == chunks.size() - 1);
-			ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
+			ze_event_handle_t event_to_use = is_last ? ze_event.get() : nullptr;
 			
-			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
+			ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
 		}
 		
-		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks (async)", chunks.size());
+		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks (immediate)", chunks.size());
 	}
 	
-	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
-	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
-	
-	// KEY DIFFERENCE: NO SYNC HERE! Submit resources for async recycling
-	pool.submit_async(ze_event, cmd_list);
+	// Immediate command lists execute synchronously, but we still sync to be safe
+	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
 	
 	last_event = queue.ext_oneapi_submit_barrier();
 }
@@ -266,20 +311,16 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    nd_copy_box_level_zero(queue, device, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
 	    [&queue, device, &last_event](const void* const source, void* const dest, size_t size_bytes) {
-		    CELERITY_TRACE("[V4] Level-Zero backend: linear copy {} bytes (async)", size_bytes);
+		    CELERITY_TRACE("[V4] Level-Zero backend: linear copy {} bytes (immediate)", size_bytes);
 		    
 		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
 		    auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
 		    
-		    auto& pool = get_resource_pool(device);
-		    auto [ze_event, cmd_list] = pool.get_resources();
+		    pooled_event ze_event(device);
+		    pooled_immediate_cmdlist cmd_list(device);
 		    
-		    ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
-		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
-		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
-		    
-		    // NO SYNC - submit for async recycling
-		    pool.submit_async(ze_event, cmd_list);
+		    ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dest, source, size_bytes, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
+		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
