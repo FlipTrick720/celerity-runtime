@@ -1,6 +1,4 @@
 #!/bin/bash
-# Automated testing script for all Level Zero backend variants
-# Usage: ./test_all_variants.sh
 
 set -e
 
@@ -38,6 +36,9 @@ VARIANT_H[variant3]="include/backend/sycl_backend copy 1.h"
 VARIANT_CC[variant4]="src/backend/sycl_level_zero_backend copy 4.cc"
 VARIANT_H[variant4]="include/backend/sycl_backend copy 1.h"
 
+# Number of iterations for each test
+NUM_ITERATIONS=5
+
 # Test each variant
 for variant in baseline variant1 variant2 variant3 variant4; do
     echo "========================================="
@@ -64,7 +65,7 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     fi
     echo "Build successful!"
     
-    # Run run_test (full test suite for correctness verification)
+    # Run run_test
     echo "Running all_tests..."
     if ./run_test.sh --profile test > "$RESULTS_DIR/${variant}_all_tests.txt" 2>&1; then
         echo "✓ all_tests complete"
@@ -73,27 +74,37 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     fi
 
     # Run performance benchmarks
-    echo "Running stress test v1..."
     cd test
-    if ./stress_v1.sh > "../$RESULTS_DIR/${variant}_stress_v1.txt" 2>&1; then
-        echo "✓ Stress v1 complete"
-    else
-        echo "✗ Stress v1 failed"
-    fi
     
-    echo "Running stress test v2..."
-    if ./stress_v2.sh > "../$RESULTS_DIR/${variant}_stress_v2.txt" 2>&1; then
-        echo "✓ Stress v2 complete"
-    else
-        echo "✗ Stress v2 failed"
-    fi
+    # Stress test v1
+    for i in $(seq 1 $NUM_ITERATIONS); do
+        echo "Running stress test v1 (iteration $i/$NUM_ITERATIONS)..."
+        if ./stress_v1.sh > "../$RESULTS_DIR/${variant}_stress_v1_${i}.txt" 2>&1; then
+            echo "✓ Stress v1 iteration $i complete"
+        else
+            echo "✗ Stress v1 iteration $i failed"
+        fi
+    done
     
-    echo "Running microbench..."
-    if ./l0_microbench.sh > "../$RESULTS_DIR/${variant}_microbench.txt" 2>&1; then
-        echo "✓ Microbench complete"
-    else
-        echo "✗ Microbench failed"
-    fi
+    # Stress test v2
+    for i in $(seq 1 $NUM_ITERATIONS); do
+        echo "Running stress test v2 (iteration $i/$NUM_ITERATIONS)..."
+        if ./stress_v2.sh > "../$RESULTS_DIR/${variant}_stress_v2_${i}.txt" 2>&1; then
+            echo "✓ Stress v2 iteration $i complete"
+        else
+            echo "✗ Stress v2 iteration $i failed"
+        fi
+    done
+    
+    # Microbench
+    for i in $(seq 1 $NUM_ITERATIONS); do
+        echo "Running microbench (iteration $i/$NUM_ITERATIONS)..."
+        if ./l0_microbench.sh > "../$RESULTS_DIR/${variant}_microbench_${i}.txt" 2>&1; then
+            echo "✓ Microbench iteration $i complete"
+        else
+            echo "✗ Microbench iteration $i failed"
+        fi
+    done
     
     cd ..
     
@@ -109,17 +120,5 @@ cp "$RESULTS_DIR/sycl_level_zero_backend_original.cc.backup" src/backend/sycl_le
 cp "$RESULTS_DIR/sycl_backend_original.h.backup" include/backend/sycl_backend.h
 
 echo "========================================="
-echo "All tests complete!"
+echo "All runs complete!"
 echo "========================================="
-echo ""
-echo "Results saved to: $RESULTS_DIR"
-echo ""
-echo "To analyze results:"
-echo "  grep 'Time:' $RESULTS_DIR/*_stress_*.txt"
-echo "  grep 'GiB/s' $RESULTS_DIR/*_microbench.txt"
-echo ""
-echo "Next steps:"
-echo "  1. Review results in $RESULTS_DIR"
-echo "  2. Create comparison table"
-echo "  3. Write response to professor"
-echo ""
