@@ -11,8 +11,8 @@ cmake --build build -j
 
 # Or run individual tests
 echo "=== Test Run: ==="
-SYCL_DEVICE_FILTER=level_zero:gpu ./build/memcpy_linear --csv results.csv
-echo "=== Results saved in /bench/results.csv ==="
+SYCL_DEVICE_FILTER=level_zero:gpu ./build/memcpy_linear
+echo "=== Fertig ==="
 
 
 
