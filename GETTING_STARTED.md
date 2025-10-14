@@ -17,7 +17,7 @@ Quick guide to clone, build, and test the Celerity runtime with oneAPI Level-Zer
 ```bash
 git clone https://github.com/FlipTrick720/celerity-runtime.git
 cd celerity-runtime
-git checkout optimized-setup-test
+git checkout develop/refactored-setup
 ```
 
 ### 2. Initialize Submodules
