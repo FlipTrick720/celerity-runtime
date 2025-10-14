@@ -3,8 +3,8 @@ compile_commands.json
 build
 build_*
 build-*
-!build_celerity.sh
-!build_and_test.sh
+!build_and_test_celerity.sh
+!build_and_run_bench.sh
 !build_bench.sh
 install
 .cache/

@@ -36,7 +36,10 @@ inline const char* backend_name(sycl::backend be) {
 		case sycl::backend::ext_oneapi_level_zero: return "level_zero";
 		case sycl::backend::ext_oneapi_cuda: return "cuda";
 		case sycl::backend::opencl: return "opencl";
+		// native_cpu only exists in AdaptiveCpp, not in Intel DPC++
+		#ifdef SYCL_BACKEND_NATIVE_CPU
 		case sycl::backend::native_cpu: return "native_cpu";
+		#endif
 		default: return "other";
 	}
 }
