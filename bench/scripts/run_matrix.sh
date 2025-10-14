@@ -2,6 +2,8 @@
 set -euo pipefail
 
 OUT_DIR="${1:-out}"
+ENABLE_CUDA="${ENABLE_CUDA:-auto}"  # auto, yes, no
+
 mkdir -p "${OUT_DIR}"
 
 date_tag=$(date +"%Y%m%d_%H%M%S")
@@ -31,12 +33,20 @@ run_backend level_zero memcpy_linear "[batch pageable]" "--batch --no-pin" "l0_m
 
 run_backend level_zero event_overhead "[default]" "" "l0_event_overhead_${date_tag}.csv"
 
-# CUDA - Full Matrix (falls vorhanden)
-run_backend cuda memcpy_linear "[sync pinned]"   ""                   "cuda_memcpy_sync_pinned_${date_tag}.csv" || true
-run_backend cuda memcpy_linear "[sync pageable]" "--no-pin"           "cuda_memcpy_sync_pageable_${date_tag}.csv" || true
-run_backend cuda memcpy_linear "[batch pinned]"  "--batch"            "cuda_memcpy_batch_pinned_${date_tag}.csv" || true
-run_backend cuda memcpy_linear "[batch pageable]" "--batch --no-pin"  "cuda_memcpy_batch_pageable_${date_tag}.csv" || true
+# CUDA - Full Matrix (optional)
+if [[ "${ENABLE_CUDA}" == "yes" ]] || [[ "${ENABLE_CUDA}" == "auto" ]]; then
+	echo ""
+	echo "=== Testing CUDA backend ==="
+	if SYCL_DEVICE_FILTER=cuda:gpu "${build_dir}/memcpy_linear" --help &>/dev/null; then
+		run_backend cuda memcpy_linear "[sync pinned]"   ""                   "cuda_memcpy_sync_pinned_${date_tag}.csv"
+		run_backend cuda memcpy_linear "[sync pageable]" "--no-pin"           "cuda_memcpy_sync_pageable_${date_tag}.csv"
+		run_backend cuda memcpy_linear "[batch pinned]"  "--batch"            "cuda_memcpy_batch_pinned_${date_tag}.csv"
+		run_backend cuda memcpy_linear "[batch pageable]" "--batch --no-pin"  "cuda_memcpy_batch_pageable_${date_tag}.csv"
+		run_backend cuda event_overhead "[default]" "" "cuda_event_overhead_${date_tag}.csv"
+	else
+		echo "No CUDA device found, skipping CUDA tests"
+	fi
+fi
 
-run_backend cuda event_overhead "[default]" "" "cuda_event_overhead_${date_tag}.csv" || true
-
+echo ""
 echo "Done. CSVs in ${OUT_DIR}/"
