@@ -1,4 +1,15 @@
 cd bench
+
 export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
 export UR_DISABLE_ADAPTERS=OPENCL
-taskset -c 0-15 ./scripts/run_matrix.sh results_run1
+
+# Run 1
+taskset -c 0-15 ./scripts/run_matrix.sh results_$(date +%Y%m%d_%H%M%S)
+
+# Run 2
+sleep 300 #(Cool Down Phase)
+taskset -c 0-15 ./scripts/run_matrix.sh results_$(date +%Y%m%d_%H%M%S)
+
+# Run 3
+sleep 300 #(Cool Down Phase)
+taskset -c 0-15 ./scripts/run_matrix.sh results_$(date +%Y%m%d_%H%M%S)
