@@ -7,9 +7,11 @@ export UR_DISABLE_ADAPTERS=OPENCL
 taskset -c 0-15 ./scripts/run_matrix.sh results_$(date +%Y%m%d_%H%M%S)
 
 # Run 2
+echo "=== Cool Down ==="
 sleep 300 #(Cool Down Phase)
 taskset -c 0-15 ./scripts/run_matrix.sh results_$(date +%Y%m%d_%H%M%S)
 
 # Run 3
+echo "=== Cool Down ==="
 sleep 300 #(Cool Down Phase)
 taskset -c 0-15 ./scripts/run_matrix.sh results_$(date +%Y%m%d_%H%M%S)
