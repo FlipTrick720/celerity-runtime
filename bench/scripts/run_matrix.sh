@@ -36,15 +36,34 @@ run_backend level_zero event_overhead "[default]" "" "l0_event_overhead_${date_t
 # CUDA - Full Matrix (optional)
 if [[ "${ENABLE_CUDA}" == "yes" ]] || [[ "${ENABLE_CUDA}" == "auto" ]]; then
 	echo ""
-	echo "=== Testing CUDA backend ==="
-	if SYCL_DEVICE_FILTER=cuda:gpu "${build_dir}/memcpy_linear" --help &>/dev/null; then
+	echo "=== Checking for CUDA backend ==="
+	
+	# Check if CUDA GPU is actually available
+	# Try to list devices and grep for CUDA
+	cuda_available=false
+	if command -v sycl-ls &>/dev/null; then
+		if sycl-ls 2>/dev/null | grep -i "cuda" &>/dev/null; then
+			cuda_available=true
+		fi
+	fi
+	
+	# Alternative: try nvidia-smi
+	if ! $cuda_available && command -v nvidia-smi &>/dev/null; then
+		if nvidia-smi &>/dev/null; then
+			cuda_available=true
+		fi
+	fi
+	
+	if $cuda_available || [[ "${ENABLE_CUDA}" == "yes" ]]; then
+		echo "CUDA device detected, running CUDA tests..."
 		run_backend cuda memcpy_linear "[sync pinned]"   ""                   "cuda_memcpy_sync_pinned_${date_tag}.csv"
 		run_backend cuda memcpy_linear "[sync pageable]" "--no-pin"           "cuda_memcpy_sync_pageable_${date_tag}.csv"
 		run_backend cuda memcpy_linear "[batch pinned]"  "--batch"            "cuda_memcpy_batch_pinned_${date_tag}.csv"
 		run_backend cuda memcpy_linear "[batch pageable]" "--batch --no-pin"  "cuda_memcpy_batch_pageable_${date_tag}.csv"
 		run_backend cuda event_overhead "[default]" "" "cuda_event_overhead_${date_tag}.csv"
 	else
-		echo "No CUDA device found, skipping CUDA tests"
+		echo "No CUDA device found (checked sycl-ls and nvidia-smi), skipping CUDA tests"
+		echo "To force CUDA tests: ENABLE_CUDA=yes ./scripts/run_matrix.sh"
 	fi
 fi
 
