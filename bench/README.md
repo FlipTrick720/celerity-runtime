@@ -71,27 +71,6 @@ Useful for understanding backend scheduling costs.
 --help              Show this help
 ```
 
-## Output Formats
-
-### Human-Readable (Console)
-```
-=== memcpy_linear ===
-Device: Intel(R) Arc(TM) A770 Graphics
-Backend: level_zero
-Mode: sync-each, HostPinned: yes
-
-D2D  size=1024       reps=5000   avg(us)=2.345     GiB/s=0.42   [sync] [pinned]
-H2D  size=1024       reps=5000   avg(us)=3.456     GiB/s=0.28   [sync] [pinned]
-...
-```
-
-### CSV Output
-```csv
-bench,backend,device,mode,pinned,op,bytes,reps,avg_us,gib_per_s
-memcpy_linear,level_zero,"Intel(R) Arc(TM) A770 Graphics",sync,yes,D2D,1024,5000,2.345,0.420000
-...
-```
-
 ## Directory Structure
 
 ```
@@ -115,31 +94,3 @@ bench/
 - C++17 compiler
 - GPU hardware (Intel Arc/Data Center GPU for Level Zero, NVIDIA for CUDA)
 
-## Reproducibility Tips
-
-For publication-quality measurements:
-
-- **Fix CPU Affinity** (Linux): `taskset -c 0-15 ./build/memcpy_linear ...`
-- **Force Level Zero**: `export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO`
-- **Disable OpenCL** (optional): `export UR_DISABLE_ADAPTERS=OPENCL`
-- **Test Both Modes**: Run with `--batch` and without (sync-each)
-- **Compare Host Memory**: Test `--no-pin` vs default pinned memory
-- **Disable Turbo Boost**: For consistent clock speeds (system-dependent)
-- **Multiple Runs**: Average 3-5 runs to account for variance
-- **Thermal Stability**: Let GPU warm up, ensure adequate cooling
-
-## Notes
-
-- Benchmarks use `SYCL_DEVICE_FILTER` for backend selection
-- Profiling enabled by default for accurate timing
-- Automatic repetition calibration based on time budget
-- Supports both pinned and pageable host memory
-- Batch mode tests enqueue overhead vs synchronization cost
-
-## Future Extensions
-
-- `memcpy_nd.cpp`: 2D/3D pitched/box copies
-- `kernel_reduce.cpp`: Reduction benchmarks
-- `kernel_stencil.cpp`: Stencil pattern benchmarks
-- `summarize.py`: CSV analysis and plotting
-- BabelStream integration for industry-standard comparison
