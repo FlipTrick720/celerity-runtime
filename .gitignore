@@ -12,6 +12,7 @@ install
 .idea/
 /tags
 __pycache__/
+variant_test_results*
 tmp*
 xx*
 yy*
