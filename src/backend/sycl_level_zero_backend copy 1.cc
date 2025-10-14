@@ -1,6 +1,5 @@
-// VARIANT 1: Event Pooling
-// Goal: Test professor's hypothesis - reuse event pools instead of creating/destroying for each operation
-// Implementation: Global persistent event pool per device (1024 events), reused with zeEventHostReset()
+//Version: v1_Event_Pooling
+//Text: reuse event pools instead of creating/destroying for each operation. Global persistent event pool per device (1024 events), reused with zeEventHostReset().
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"

@@ -1,7 +1,5 @@
-// VARIANT 4: Immediate Command Lists + Persistent Pool
-// Goal: Use zeCommandListCreateImmediate (persistent per device)
-// Implementation: Immediate command lists with persistent event pool
-// Hypothesis: Significantly less host overhead per submit
+//Version: v4_Command_Lists_y_Persistent_Pool
+//Text: Use zeCommandListCreateImmediate (persistent per device). Immediate command lists with persistent event pool
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"

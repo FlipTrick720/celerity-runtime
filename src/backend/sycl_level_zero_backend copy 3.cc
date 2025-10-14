@@ -1,7 +1,5 @@
-// VARIANT 3: Pool + Event Reuse (Free-List)
-// Goal: Persistent pool + event recycling via free-list
-// Implementation: Same as V1 but with explicit free-list management for better tracking
-// Hypothesis: Event creation costs disappear with reuse
+//Version: v3_Pool_y_Event_Reuse
+//Text: Persistent pool + event recycling via free-list. Same as V1 but with explicit free-list management for better tracking.
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"

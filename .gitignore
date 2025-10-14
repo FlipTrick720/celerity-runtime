@@ -5,7 +5,8 @@ build_*
 build-*
 !build_and_test_celerity.sh
 !build_and_run_bench.sh
-!build_bench.sh
+build_bench.sh
+BENCH_WORKFLOW.md
 plots_l0/
 results/
 install

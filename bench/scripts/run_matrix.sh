@@ -4,11 +4,63 @@ set -euo pipefail
 OUT_DIR="${1:-out}"
 ENABLE_CUDA="${ENABLE_CUDA:-auto}"  # auto, yes, no
 
-mkdir -p "${OUT_DIR}"
+# Backend version/tag for tracking different implementations
+# Try to auto-detect from backend source file if not set
+BACKEND_SOURCE="../src/backend/sycl_level_zero_backend.cc"
+if [[ -z "${BACKEND_TAG}" ]] && [[ -f "${BACKEND_SOURCE}" ]]; then
+	# Read first line: //Version: v1_baseline
+	BACKEND_TAG=$(grep -m1 "^//Version:" "${BACKEND_SOURCE}" 2>/dev/null | sed 's/^\/\/Version: *//' | tr -d '\r\n' || echo "")
+fi
+if [[ -z "${BACKEND_NOTES}" ]] && [[ -f "${BACKEND_SOURCE}" ]]; then
+	# Read second line: //Text: Initial implementation
+	BACKEND_NOTES=$(grep -m1 "^//Text:" "${BACKEND_SOURCE}" 2>/dev/null | sed 's/^\/\/Text: *//' | tr -d '\r\n' || echo "")
+fi
 
+# Allow manual override via environment variables
+BACKEND_TAG="${BACKEND_TAG:-}"
+BACKEND_NOTES="${BACKEND_NOTES:-}"
+
+# Auto-detect git info if available
+GIT_SHA=""
+GIT_BRANCH=""
+GIT_DIRTY=""
+if git rev-parse --git-dir > /dev/null 2>&1; then
+	GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+	GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+	if [[ -n $(git status --porcelain 2>/dev/null) ]]; then
+		GIT_DIRTY="-dirty"
+	fi
+fi
+
+# Build result directory name with optional tag
 date_tag=$(date +"%Y%m%d_%H%M%S")
-build_dir="${OUT_DIR}/build_${date_tag}"
+if [[ -n "${BACKEND_TAG}" ]]; then
+	result_dir="${OUT_DIR}/results_${BACKEND_TAG}_${date_tag}"
+else
+	result_dir="${OUT_DIR}/results_${date_tag}"
+fi
+
+build_dir="${result_dir}/build"
+mkdir -p "${result_dir}"
 mkdir -p "${build_dir}"
+
+# Write metadata file
+cat > "${result_dir}/metadata.txt" << EOF
+# Benchmark Run Metadata
+Timestamp: $(date '+%Y-%m-%d %H:%M:%S')
+Date Tag: ${date_tag}
+Backend Tag: ${BACKEND_TAG:-none}
+Backend Notes: ${BACKEND_NOTES:-none}
+Git SHA: ${GIT_SHA}${GIT_DIRTY}
+Git Branch: ${GIT_BRANCH}
+Hostname: $(hostname)
+User: $(whoami)
+SYCL Implementation: ${CELERITY_SYCL_IMPL:-auto-detected}
+EOF
+
+echo "=== Benchmark Run Info ==="
+cat "${result_dir}/metadata.txt"
+echo ""
 
 cmake -S "$(dirname "$0")/.." -B "${build_dir}"
 cmake --build "${build_dir}" -j
@@ -22,7 +74,7 @@ run_backend() {
 	
 	echo "Running ${exe} on backend=${backend} ${suffix} -> ${csv}"
 	SYCL_DEVICE_FILTER="${backend}:gpu" "${build_dir}/${exe}" \
-		--csv "${OUT_DIR}/${csv}" --min 1024 --max $((1<<26)) --steps 16 --secs 1 ${extra} || true
+		--csv "${result_dir}/${csv}" --min 1024 --max $((1<<26)) --steps 16 --secs 1 ${extra} || true
 }
 
 # Level Zero - Full Matrix (sync/batch × pinned/pageable)
@@ -68,4 +120,9 @@ if [[ "${ENABLE_CUDA}" == "yes" ]] || [[ "${ENABLE_CUDA}" == "auto" ]]; then
 fi
 
 echo ""
-echo "Done. CSVs in ${OUT_DIR}/"
+echo "=== Benchmark Complete ==="
+echo "Results directory: ${result_dir}"
+echo "Metadata: ${result_dir}/metadata.txt"
+echo "CSVs: ${result_dir}/*.csv"
+echo ""
+echo "To analyze: python3 bench/scripts/analyze_results.py ${result_dir}"
