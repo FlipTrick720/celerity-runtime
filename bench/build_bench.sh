@@ -2,7 +2,7 @@
 # Build benchmark executables
 # Can be called from root or bench directory
 
-set -euo pipefail
+set -eo pipefail  # Removed -u to allow oneAPI setvars.sh to work
 
 # Change to bench directory if not already there
 if [[ ! -f "CMakeLists.txt" ]]; then
@@ -22,12 +22,18 @@ echo "========================================="
 if [ -z "${ONEAPI_ROOT:-}" ]; then
     echo "Loading oneAPI environment..."
     if [ -f /opt/intel/oneapi/setvars.sh ]; then
-        source /opt/intel/oneapi/setvars.sh
+        # Temporarily disable -u flag for oneAPI script
+        set +u
+        source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1
+        set -u
+        echo "✓ oneAPI loaded"
     else
         echo "Error: oneAPI not found at /opt/intel/oneapi/setvars.sh"
         echo "Please run: source /opt/intel/oneapi/setvars.sh"
         exit 1
     fi
+else
+    echo "✓ oneAPI already loaded"
 fi
 
 # Get Git SHA if available

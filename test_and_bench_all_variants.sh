@@ -27,6 +27,7 @@ VARIANTS[variant1]="src/backend/sycl_level_zero_backend copy 1.cc"
 VARIANTS[variant2]="src/backend/sycl_level_zero_backend copy 2.cc"
 VARIANTS[variant3]="src/backend/sycl_level_zero_backend copy 3.cc"
 VARIANTS[variant4]="src/backend/sycl_level_zero_backend copy 4.cc"
+VARIANTS[variant5]="src/backend/sycl_level_zero_backend copy 5.cc"
 
 declare -A VARIANT_HEADERS
 VARIANT_HEADERS[baseline]="include/backend/sycl_backend.h"
@@ -34,9 +35,10 @@ VARIANT_HEADERS[variant1]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant2]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant3]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant4]="include/backend/sycl_backend copy 1.h"
+VARIANT_HEADERS[variant5]="include/backend/sycl_backend copy 1.h"
 
 # Test each variant
-for variant in baseline variant1 variant2 variant3 variant4; do
+for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     echo ""
     echo "========================================="
     echo "Testing: $variant"

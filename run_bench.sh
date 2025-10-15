@@ -21,13 +21,11 @@ echo ""
 # Check if benchmarks are built, build if needed
 if [[ ! -f "bench/build/memcpy_linear" ]] || [[ ! -f "bench/build/event_overhead" ]]; then
     echo "Building benchmarks..."
-    cd bench
-    if ! ./build_bench.sh > /dev/null 2>&1; then
+    if ! bench/build_bench.sh > /dev/null 2>&1; then
         echo "Error: Benchmark build failed"
         echo "Run manually: cd bench && ./build_bench.sh"
         exit 1
     fi
-    cd ..
     echo "✓ Build complete"
 else
     echo "✓ Benchmarks already built (bench/build/)"
