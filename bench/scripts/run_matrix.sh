@@ -4,21 +4,17 @@ set -euo pipefail
 OUT_DIR="${1:-out}"
 ENABLE_CUDA="${ENABLE_CUDA:-auto}"  # auto, yes, no
 
-# Backend version/tag for tracking different implementations
-# Try to auto-detect from backend source file if not set
+# Backend version/tag - read from source file
 BACKEND_SOURCE="../src/backend/sycl_level_zero_backend.cc"
-if [[ -z "${BACKEND_TAG}" ]] && [[ -f "${BACKEND_SOURCE}" ]]; then
+BACKEND_TAG=""
+BACKEND_NOTES=""
+
+if [[ -f "${BACKEND_SOURCE}" ]]; then
 	# Read first line: //Version: v1_baseline
 	BACKEND_TAG=$(grep -m1 "^//Version:" "${BACKEND_SOURCE}" 2>/dev/null | sed 's/^\/\/Version: *//' | tr -d '\r\n' || echo "")
-fi
-if [[ -z "${BACKEND_NOTES}" ]] && [[ -f "${BACKEND_SOURCE}" ]]; then
 	# Read second line: //Text: Initial implementation
 	BACKEND_NOTES=$(grep -m1 "^//Text:" "${BACKEND_SOURCE}" 2>/dev/null | sed 's/^\/\/Text: *//' | tr -d '\r\n' || echo "")
 fi
-
-# Allow manual override via environment variables
-BACKEND_TAG="${BACKEND_TAG:-}"
-BACKEND_NOTES="${BACKEND_NOTES:-}"
 
 # Auto-detect git info if available
 GIT_SHA=""
