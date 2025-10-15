@@ -64,13 +64,17 @@ for variant in baseline variant1 variant2 variant3 variant4; do
         continue
     fi
     
-    # Build benchmarks
-    echo "Building benchmarks..."
-    if (cd bench && ./build_bench.sh > /dev/null 2>&1); then
-        echo "✓ Benchmark build successful"
+    # Build benchmarks (only once, first variant)
+    if [[ "$variant" == "baseline" ]]; then
+        echo "Building benchmarks..."
+        if (cd bench && ./build_bench.sh > /dev/null 2>&1); then
+            echo "✓ Benchmark build successful"
+        else
+            echo "✗ Benchmark build failed"
+            continue
+        fi
     else
-        echo "✗ Benchmark build failed"
-        continue
+        echo "✓ Using existing benchmark build"
     fi
     
     # Run tests
