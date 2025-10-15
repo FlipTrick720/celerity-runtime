@@ -19,13 +19,22 @@ endif()
 # SYCL compile and link flags for Intel oneAPI
 set(SYCL_FLAGS "-fsycl")
 
-# Intel GPU target flags (Arc/Data Center GPUs)
-# Separate flags as list for proper CMake handling
-set(INTEL_GPU_FLAGS 
-    "-fsycl-targets=spir64_gen"
-    "-Xsycl-target-backend=spir64_gen"
-    "-device dg2"
-)
+# Intel GPU target flags (Arc/Data Center GPUs) - OPTIONAL
+# These trigger JIT compilation which is SLOW (~2-3 minutes)
+# Only enable if you need ahead-of-time (AOT) compilation
+option(ENABLE_INTEL_GPU_AOT "Enable Intel GPU AOT compilation (slow build, faster runtime)" OFF)
+
+if(ENABLE_INTEL_GPU_AOT)
+    message(STATUS "Intel GPU AOT compilation enabled (slow build)")
+    set(INTEL_GPU_FLAGS 
+        "-fsycl-targets=spir64_gen"
+        "-Xsycl-target-backend=spir64_gen"
+        "-device dg2"
+    )
+else()
+    message(STATUS "Intel GPU AOT compilation disabled (fast build, JIT at runtime)")
+    set(INTEL_GPU_FLAGS "")
+endif()
 
 add_executable(memcpy_linear micro/memcpy_linear.cpp)
 target_include_directories(memcpy_linear PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
