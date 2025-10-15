@@ -59,8 +59,8 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     fi
     
     # Update version tag in source
-    sed -i "1s|.*|//Version: ${variant}|" src/backend/sycl_level_zero_backend.cc
-    sed -i "2s|.*|//Text: Automated test of ${variant}|" src/backend/sycl_level_zero_backend.cc
+    #sed -i "1s|.*|//Version: ${variant}|" src/backend/sycl_level_zero_backend.cc
+    #sed -i "2s|.*|//Text: Automated test of ${variant}|" src/backend/sycl_level_zero_backend.cc
     
     # Build Celerity
     echo "Building Celerity..."
@@ -84,14 +84,22 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
         echo "✓ Using existing benchmark build"
     fi
     
-    # Run tests
+    # Run tests (optional - don't fail if tests aren't built)
     echo "Running tests..."
     if ./run_test.sh --profile test > "$VARIANT_DIR/tests.log" 2>&1; then
         echo "✓ Tests passed"
+        if [ -f "$VARIANT_DIR/tests.log" ]; then
+            tail -n 16 "$VARIANT_DIR/tests.log"
+        fi
     else
-        echo "✗ Tests failed - check $VARIANT_DIR/tests.log"
+        echo "⚠️  Tests not available or failed - check $VARIANT_DIR/tests.log"
+        echo "   (This is OK - continuing with benchmarks...)"
+        # Show what happened
+        if [ -f "$VARIANT_DIR/tests.log" ]; then
+            echo "   Last few lines:"
+            tail -n 5 "$VARIANT_DIR/tests.log" | sed 's/^/   /'
+        fi
     fi
-    tail -n 16 "$VARIANT_DIR/tests.log"
     
     # Cool down
     echo "Cool down (30s)..."
@@ -104,9 +112,12 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
     export UR_DISABLE_ADAPTERS=OPENCL
     
+    # Ensure bench.log directory exists
+    mkdir -p "$(dirname "$VARIANT_DIR/bench.log")"
+    
     # Run benchmarks and save to variant-specific directory in bench/results/
     cd bench
-    if ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh "results" > "$VARIANT_DIR/bench.log" 2>&1; then
+    if ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh "results" > "../$VARIANT_DIR/bench.log" 2>&1; then
         echo "✓ Benchmarks complete"
         
         # Find the latest results directory for this variant
@@ -118,6 +129,13 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
         echo "✗ Benchmarks failed - check $VARIANT_DIR/bench.log"
     fi
     cd ..
+    
+    # Show last few lines of bench log for quick feedback
+    if [ -f "$VARIANT_DIR/bench.log" ]; then
+        echo ""
+        echo "Last 10 lines of benchmark log:"
+        tail -n 10 "$VARIANT_DIR/bench.log"
+    fi
     
     echo "$variant complete!"
 done
