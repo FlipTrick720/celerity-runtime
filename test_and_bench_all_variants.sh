@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Test all backend variants
 # Cycles through variant implementations, builds, tests, and benchmarks each
+# Creates output structure compatible with analyze_results.py and compare_versions.py
 
 set -euo pipefail
 
@@ -9,8 +10,9 @@ echo "Level Zero Backend Variant Testing"
 echo "========================================="
 echo ""
 
-# Create results directory
-RESULTS_DIR="variant_test_results_$(date +%Y%m%d_%H%M%S)"
+# Create results directory with timestamp
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RESULTS_DIR="variant_test_results_${TIMESTAMP}"
 mkdir -p "$RESULTS_DIR"
 echo "Results directory: $RESULTS_DIR"
 echo ""
@@ -69,10 +71,10 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     # Build benchmarks (only once, first variant)
     if [[ "$variant" == "baseline" ]]; then
         echo "Building benchmarks..."
-        if (cd bench && ./build_bench.sh > /dev/null 2>&1); then
+        if (cd bench && ./build_bench.sh) > "$VARIANT_DIR/bench_build.log" 2>&1; then
             echo "✓ Benchmark build successful"
         else
-            echo "✗ Benchmark build failed"
+            echo "✗ Benchmark build failed - check $VARIANT_DIR/bench_build.log"
             continue
         fi
     else
@@ -92,14 +94,27 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     echo "Cool down (30s)..."
     sleep 30
     
-    # Run benchmarks (calls run_bench.sh logic)
+    # Run benchmarks - directly call run_matrix.sh to control output location
     echo "Running benchmarks..."
-    if ./run_bench.sh > "$VARIANT_DIR/bench.log" 2>&1; then
+    
+    # Set reproducibility environment
+    export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
+    export UR_DISABLE_ADAPTERS=OPENCL
+    
+    # Run benchmarks and save to variant-specific directory in bench/results/
+    cd bench
+    if ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh "results" > "$VARIANT_DIR/bench.log" 2>&1; then
         echo "✓ Benchmarks complete"
-        echo "  Results: bench/results/results_${variant}_*"
+        
+        # Find the latest results directory for this variant
+        LATEST_RESULT=$(ls -td results/results_${variant}_* 2>/dev/null | head -1)
+        if [[ -n "$LATEST_RESULT" ]]; then
+            echo "  Results: bench/${LATEST_RESULT}"
+        fi
     else
         echo "✗ Benchmarks failed - check $VARIANT_DIR/bench.log"
     fi
+    cd ..
     
     echo "$variant complete!"
 done
@@ -116,28 +131,43 @@ echo "All Variants Complete!"
 echo "========================================="
 echo ""
 echo "Test logs: $RESULTS_DIR/"
-for variant in baseline variant1 variant2 variant3 variant4; do
+for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     if [ -d "$RESULTS_DIR/$variant" ]; then
         echo "  $variant/"
         echo "    ├── build.log"
         echo "    ├── tests.log"
+        echo "    ├── bench_build.log (if first variant)"
         echo "    └── bench.log"
     fi
 done
 
 echo ""
 echo "Benchmark results: bench/results/"
-for variant in baseline variant1 variant2 variant3 variant4; do
+FOUND_VARIANTS=()
+for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     result_dir=$(ls -d bench/results/results_${variant}_* 2>/dev/null | tail -1)
     if [ -n "$result_dir" ]; then
         echo "  ${variant}: ${result_dir}"
+        FOUND_VARIANTS+=("\"${variant}\"")
     fi
 done
 
 echo ""
-echo "Next steps:"
-echo "  1. Download bench/results/ to local machine"
-echo "  2. Edit compare_bench.sh:"
-echo "     VERSIONS=(\"baseline\" \"variant1\" \"variant2\" \"variant3\" \"variant4\")"
-echo "  3. Run: ./compare_bench.sh"
+echo "========================================="
+echo "Next Steps - Local Analysis"
+echo "========================================="
+echo ""
+echo "1. Download results from server:"
+echo "   scp -r server:path/to/bench/results/ bench/"
+echo ""
+echo "2. Edit compare_bench.sh and set:"
+echo "   VERSIONS=(${FOUND_VARIANTS[@]})"
+echo ""
+echo "3. Run analysis:"
+echo "   ./compare_bench.sh"
+echo ""
+echo "This will generate:"
+echo "  - Individual plots: bench/plots_<variant>/"
+echo "  - Comparison plots: bench/comparison_all/"
+echo "  - Summary tables: bench/plots_*/summary_statistics.csv"
 echo ""

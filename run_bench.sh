@@ -21,7 +21,7 @@ echo ""
 # Check if benchmarks are built, build if needed
 if [[ ! -f "bench/build/memcpy_linear" ]] || [[ ! -f "bench/build/event_overhead" ]]; then
     echo "Building benchmarks..."
-    if ! bench/build_bench.sh > /dev/null 2>&1; then
+    if ! (cd bench && ./build_bench.sh) > /dev/null 2>&1; then
         echo "Error: Benchmark build failed"
         echo "Run manually: cd bench && ./build_bench.sh"
         exit 1
@@ -38,7 +38,9 @@ export UR_DISABLE_ADAPTERS=OPENCL
 
 # Run benchmark - saves directly to bench/results/
 echo "Starting benchmark run..."
+cd bench
 ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh results
+cd ..
 
 echo ""
 echo "========================================="

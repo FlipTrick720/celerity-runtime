@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Build benchmark executables
-# Can be called from root or bench directory
-
-set -eo pipefail  # Removed -u to allow oneAPI setvars.sh to work
+set -euo pipefail
 
 # Change to bench directory if not already there
 if [[ ! -f "CMakeLists.txt" ]]; then
@@ -17,6 +14,15 @@ fi
 echo "========================================="
 echo "Building Benchmark Executables"
 echo "========================================="
+
+# Build directory - use "build" to match run_matrix.sh expectations
+BUILD_DIR="build"
+
+# Clean old build
+if [[ -d "${BUILD_DIR}" ]]; then
+    echo "Cleaning old build..."
+    rm -rf "${BUILD_DIR}"
+fi
 
 # Ensure oneAPI is loaded
 if [ -z "${ONEAPI_ROOT:-}" ]; then
@@ -40,24 +46,9 @@ fi
 GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 echo "Git SHA: ${GIT_SHA}"
 
-# Build directory
-BUILD_DIR="${1:-build}"
-
-# Clean old build
-if [[ -d "${BUILD_DIR}" ]]; then
-    echo "Cleaning old build..."
-    rm -rf "${BUILD_DIR}"
-fi
-
-# Configure with icpx (Intel DPC++)
-echo "Configuring with CMake..."
-cmake -S . -B "${BUILD_DIR}" \
-    -DCMAKE_CXX_COMPILER=icpx \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DGIT_SHA="${GIT_SHA}"
-
-# Build
-echo "Building..."
+# Configure and build
+echo "Configuring and building..."
+cmake -S . -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}" -j
 
 echo ""

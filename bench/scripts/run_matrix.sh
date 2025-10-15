@@ -36,9 +36,7 @@ else
 	result_dir="${OUT_DIR}/results_${date_tag}"
 fi
 
-build_dir="${result_dir}/build"
 mkdir -p "${result_dir}"
-mkdir -p "${build_dir}"
 
 # Write metadata file
 cat > "${result_dir}/metadata.txt" << EOF
@@ -58,8 +56,19 @@ echo "=== Benchmark Run Info ==="
 cat "${result_dir}/metadata.txt"
 echo ""
 
-cmake -S "$(dirname "$0")/.." -B "${build_dir}"
-cmake --build "${build_dir}" -j
+# Use shared build directory (created by build_bench.sh)
+build_dir="build"
+
+# Check if benchmarks are built
+if [[ ! -f "${build_dir}/memcpy_linear" ]] || [[ ! -f "${build_dir}/event_overhead" ]]; then
+	echo "Building benchmarks..."
+	cmake -S "$(dirname "$0")/.." -B "${build_dir}"
+	cmake --build "${build_dir}" -j
+	echo "✓ Build complete"
+else
+	echo "✓ Using existing benchmark build (${build_dir}/)"
+fi
+echo ""
 
 run_backend() {
 	local backend="$1"
