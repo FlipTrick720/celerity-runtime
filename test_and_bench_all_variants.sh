@@ -50,10 +50,13 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     VARIANT_DIR="$RESULTS_DIR/$variant"
     mkdir -p "$VARIANT_DIR"
     
-    # Copy variant files
-    echo "Installing $variant files..."
-    cp "${VARIANTS[$variant]}" src/backend/sycl_level_zero_backend.cc
-    cp "${VARIANT_HEADERS[$variant]}" include/backend/sycl_backend.h
+    if [[ "$variant" != "baseline" ]]; then
+        echo "Installing $variant files..."
+        cp "${VARIANTS[$variant]}" src/backend/sycl_level_zero_backend.cc
+        cp "${VARIANT_HEADERS[$variant]}" include/backend/sycl_backend.h
+    else
+        echo "Using baseline (no file changes needed)..."
+    fi
     
     # Update version tag in source
     sed -i "1s|.*|//Version: ${variant}|" src/backend/sycl_level_zero_backend.cc
