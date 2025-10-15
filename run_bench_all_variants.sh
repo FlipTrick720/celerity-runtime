@@ -55,21 +55,12 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     sed -i "1s|.*|//Version: ${variant}|" src/backend/sycl_level_zero_backend.cc
     sed -i "2s|.*|//Text: Automated test of ${variant}|" src/backend/sycl_level_zero_backend.cc
     
-    # Build Celerity
-    echo "Building Celerity..."
+    # Build
+    echo "Building..."
     if ./build_celerity.sh > "$VARIANT_DIR/build.log" 2>&1; then
-        echo "✓ Celerity build successful"
+        echo "✓ Build successful"
     else
-        echo "✗ Celerity build failed - check $VARIANT_DIR/build.log"
-        continue
-    fi
-    
-    # Build benchmarks
-    echo "Building benchmarks..."
-    if (cd bench && ./build_bench.sh > /dev/null 2>&1); then
-        echo "✓ Benchmark build successful"
-    else
-        echo "✗ Benchmark build failed"
+        echo "✗ Build failed - check $VARIANT_DIR/build.log"
         continue
     fi
     
@@ -80,7 +71,7 @@ for variant in baseline variant1 variant2 variant3 variant4; do
     else
         echo "✗ Tests failed - check $VARIANT_DIR/tests.log"
     fi
-    tail -n 16 "$VARIANT_DIR/tests.log"
+    tail -n 10 "$VARIANT_DIR/tests.log"
     
     # Cool down
     echo "Cool down (30s)..."

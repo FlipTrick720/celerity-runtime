@@ -18,7 +18,16 @@ echo "Backend Version: ${VERSION}"
 echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
+# Build benchmarks first
+echo "Building benchmarks..."
 cd bench
+if ! ./build_bench.sh > /dev/null 2>&1; then
+    echo "Error: Benchmark build failed"
+    echo "Run manually: cd bench && ./build_bench.sh"
+    exit 1
+fi
+echo "✓ Build complete"
+echo ""
 
 # Reproducibility settings
 export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
