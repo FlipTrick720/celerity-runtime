@@ -93,12 +93,7 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
         fi
     else
         echo "⚠️  Tests not available or failed - check $VARIANT_DIR/tests.log"
-        echo "   (This is OK - continuing with benchmarks...)"
-        # Show what happened
-        if [ -f "$VARIANT_DIR/tests.log" ]; then
-            echo "   Last few lines:"
-            tail -n 5 "$VARIANT_DIR/tests.log" | sed 's/^/   /'
-        fi
+        echo "    (Continuing with benchmarks...)"
     fi
     
     # Cool down
@@ -117,26 +112,13 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     
     # Run benchmarks and save to variant-specific directory in bench/results/
     cd bench
-    if ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh "results" > "../$VARIANT_DIR/bench.log" 2>&1; then
-        echo "✓ Benchmarks complete"
-        
-        # Find the latest results directory for this variant
-        LATEST_RESULT=$(ls -td results/results_${variant}_* 2>/dev/null | head -1)
-        if [[ -n "$LATEST_RESULT" ]]; then
-            echo "  Results: bench/${LATEST_RESULT}"
-        fi
+    if ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh results > "../$VARIANT_DIR/bench.log" 2>&1; then
+        echo "✓ Benchmarks complete"        
     else
         echo "✗ Benchmarks failed - check $VARIANT_DIR/bench.log"
     fi
     cd ..
-    
-    # Show last few lines of bench log for quick feedback
-    if [ -f "$VARIANT_DIR/bench.log" ]; then
-        echo ""
-        echo "Last 10 lines of benchmark log:"
-        tail -n 10 "$VARIANT_DIR/bench.log"
-    fi
-    
+       
     echo "$variant complete!"
 done
 
