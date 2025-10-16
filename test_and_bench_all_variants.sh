@@ -46,10 +46,6 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     echo "Testing: $variant"
     echo "========================================="
     
-    # Create variant log directory
-    VARIANT_DIR="$RESULTS_DIR/$variant"
-    mkdir -p "$VARIANT_DIR"
-    
     if [[ "$variant" != "baseline" ]]; then
         echo "Installing $variant files..."
         cp "${VARIANTS[$variant]}" src/backend/sycl_level_zero_backend.cc
@@ -57,10 +53,22 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     else
         echo "Using baseline (no file changes needed)..."
     fi
-    
-    # Update version tag in source
-    #sed -i "1s|.*|//Version: ${variant}|" src/backend/sycl_level_zero_backend.cc
-    #sed -i "2s|.*|//Text: Automated test of ${variant}|" src/backend/sycl_level_zero_backend.cc
+
+    # Backend version/tag - read from source file
+    BACKEND_SOURCE="../src/backend/sycl_level_zero_backend.cc"
+    BACKEND_TAG=""
+    BACKEND_NOTES=""
+
+    if [[ -f "${BACKEND_SOURCE}" ]]; then
+    	# Read first line: //Version: v1_baseline
+    	BACKEND_TAG=$(grep -m1 "^//Version:" "${BACKEND_SOURCE}" 2>/dev/null | sed 's/^\/\/Version: *//' | tr -d '\r\n' || echo "untagged")
+    	# Read second line: //Text: Initial implementation
+    	BACKEND_NOTES=$(grep -m1 "^//Text:" "${BACKEND_SOURCE}" 2>/dev/null | sed 's/^\/\/Text: *//' | tr -d '\r\n' || echo "no_notes_found")
+    fi
+
+    # Create variant log directory
+    VARIANT_DIR="$RESULTS_DIR/$BACKEND_TAG"
+    mkdir -p "$VARIANT_DIR"
     
     # Build Celerity
     echo "Building Celerity..."
