@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure oneAPI is loaded (needed to run SYCL executables)
+if [ -z "${ONEAPI_ROOT:-}" ]; then
+    echo "Loading oneAPI environment..."
+    if [ -f /opt/intel/oneapi/setvars.sh ]; then
+        set +u  # Temporarily disable -u for oneAPI script
+        source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1
+        set -u
+        echo "✓ oneAPI loaded"
+    else
+        echo "⚠️  Warning: oneAPI not found at /opt/intel/oneapi/setvars.sh"
+        echo "   Benchmarks may fail if SYCL libraries are not in LD_LIBRARY_PATH"
+    fi
+else
+    echo "✓ oneAPI already loaded"
+fi
+echo ""
+
 OUT_DIR="${1:-out}"
 ENABLE_CUDA="${ENABLE_CUDA:-auto}"  # auto, yes, no
 
