@@ -292,8 +292,9 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks (immediate)", chunks.size());
 	}
 	
-	// Immediate command lists execute synchronously, but we still sync to be safe
-	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+	// Immediate command lists execute synchronously, but we need to wait for completion
+	// Wait on the event to ensure the copy is complete
+	ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 	
 	last_event = queue.ext_oneapi_submit_barrier();
 }
@@ -318,7 +319,8 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    pooled_immediate_cmdlist cmd_list(device);
 		    
 		    ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dest, source, size_bytes, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
-		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+		    // Wait on the event to ensure the copy is complete
+		    ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
