@@ -55,7 +55,7 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     fi
 
     # Backend version/tag - read from source file
-    BACKEND_SOURCE="../src/backend/sycl_level_zero_backend.cc"
+    BACKEND_SOURCE="src/backend/sycl_level_zero_backend.cc"
     BACKEND_TAG=""
     BACKEND_NOTES=""
 
@@ -69,6 +69,9 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     # Create variant log directory
     VARIANT_DIR="$RESULTS_DIR/$BACKEND_TAG"
     mkdir -p "$VARIANT_DIR"
+
+    echo "Tag: $BACKEND_TAG"
+    echo "Var Dir: $VARIANT_DIR"
     
     # Build Celerity
     echo "Building Celerity..."
