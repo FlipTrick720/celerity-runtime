@@ -73,11 +73,11 @@ public:
 	ze_event_handle_t get_event() {
 		std::lock_guard<std::mutex> lock(m_mutex);
 		
-		// Try to reuse from free list
+		// Try to reuse from free list (already reset by release())
 		if(!m_free_events.empty()) {
 			auto event = m_free_events.back();
 			m_free_events.pop_back();
-			zeEventHostReset(event);
+			// FIX: Event already reset in release(), no need to reset again
 			return event;
 		}
 		
@@ -184,12 +184,24 @@ public:
 	}
 	
 	~pooled_event() {
-		if(m_event) {
+		if(m_event && !m_released) {
+			// FIX: Should not happen - event should be explicitly released after sync
+			CELERITY_WARN("[V4] Event returned to pool without explicit release - possible bug");
 			get_immediate_pool(m_device).return_event(m_event);
 		}
 	}
 	
 	ze_event_handle_t get() const { return m_event; }
+	
+	// FIX: Explicit release after synchronization
+	void release() {
+		if(m_event && !m_released) {
+			// Event must be synchronized and reset before returning to pool
+			zeEventHostReset(m_event);
+			get_immediate_pool(m_device).return_event(m_event);
+			m_released = true;
+		}
+	}
 	
 	pooled_event(const pooled_event&) = delete;
 	pooled_event& operator=(const pooled_event&) = delete;
@@ -197,6 +209,7 @@ public:
 private:
 	device_id m_device;
 	ze_event_handle_t m_event = nullptr;
+	bool m_released = false;
 };
 
 class pooled_immediate_cmdlist {
@@ -297,11 +310,13 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks (immediate)", chunks.size());
 	}
 	
-	// FIX: Immediate command lists execute synchronously, but we MUST wait on the event
-	// before the pooled_event destructor tries to return it to the pool
+	// FIX: Wait for completion, then explicitly release event back to pool
 	ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 	
-	// Now it's safe to create the SYCL barrier (event will be reset and returned to pool on scope exit)
+	// Explicitly release event (resets and returns to pool)
+	ze_event.release();
+	
+	// Now create the SYCL barrier
 	last_event = queue.ext_oneapi_submit_barrier();
 }
 
@@ -332,8 +347,10 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    pooled_immediate_cmdlist cmd_list(device);
 		    
 		    ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dest, source, size_bytes, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
-		    // FIX: Wait on the event to ensure the copy is complete before returning event to pool
+		    
+		    // FIX: Wait for completion, then explicitly release event back to pool
 		    ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
+		    ze_event.release();
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
