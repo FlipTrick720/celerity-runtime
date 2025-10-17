@@ -95,7 +95,12 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	
 	const auto layout = layout_nd_copy(src_range, dst_range, src_offset, dst_offset, copy_range, elem_size);
 	
-	if(layout.contiguous_size == 0) return;
+	// FIX: Guard against empty work - return immediately with barrier event
+	if(layout.contiguous_size == 0) {
+		CELERITY_TRACE("[V5-NoSync] Level-Zero backend: empty copy, skipping");
+		last_event = queue.ext_oneapi_submit_barrier();
+		return;
+	}
 	
 	// Get native Level Zero handles
 	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
@@ -194,7 +199,14 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
 	    },
 		// linear path
 	    [&queue, &last_event](const void* const source, void* const dest, size_t size_bytes) {
-		    CELERITY_TRACE("Level-Zero backend: linear copy {} bytes", size_bytes);
+		    // FIX: Guard against empty work
+		    if(size_bytes == 0) {
+			    CELERITY_TRACE("[V5-NoSync] Level-Zero backend: empty linear copy, skipping");
+			    last_event = queue.ext_oneapi_submit_barrier();
+			    return;
+		    }
+		    
+		    CELERITY_TRACE("[V5-NoSync] Level-Zero backend: linear copy {} bytes", size_bytes);
 		    
 		    // Get native Level Zero handles
 		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
@@ -275,6 +287,9 @@ sycl_level_zero_backend::sycl_level_zero_backend(const std::vector<sycl::device>
 		}
 	}
 }
+
+// FIX: Provide out-of-line destructor to anchor vtable
+sycl_level_zero_backend::~sycl_level_zero_backend() = default;
 
 async_event sycl_level_zero_backend::enqueue_device_copy(device_id device, size_t device_lane, const void* const source_base, void* const dest_base,
     const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size) //

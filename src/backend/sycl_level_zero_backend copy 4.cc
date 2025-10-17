@@ -239,7 +239,12 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 	
 	const auto layout = layout_nd_copy(src_range, dst_range, src_offset, dst_offset, copy_range, elem_size);
 	
-	if(layout.contiguous_size == 0) return;
+	// FIX: Guard against empty work
+	if(layout.contiguous_size == 0) {
+		CELERITY_TRACE("[V4] Level-Zero backend: empty copy, skipping");
+		last_event = queue.ext_oneapi_submit_barrier();
+		return;
+	}
 	
 	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
 	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
@@ -292,10 +297,11 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks (immediate)", chunks.size());
 	}
 	
-	// Immediate command lists execute synchronously, but we need to wait for completion
-	// Wait on the event to ensure the copy is complete
+	// FIX: Immediate command lists execute synchronously, but we MUST wait on the event
+	// before the pooled_event destructor tries to return it to the pool
 	ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 	
+	// Now it's safe to create the SYCL barrier (event will be reset and returned to pool on scope exit)
 	last_event = queue.ext_oneapi_submit_barrier();
 }
 
@@ -310,6 +316,13 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    nd_copy_box_level_zero(queue, device, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
 	    [&queue, device, &last_event](const void* const source, void* const dest, size_t size_bytes) {
+		    // FIX: Guard against empty work
+		    if(size_bytes == 0) {
+			    CELERITY_TRACE("[V4] Level-Zero backend: empty linear copy, skipping");
+			    last_event = queue.ext_oneapi_submit_barrier();
+			    return;
+		    }
+		    
 		    CELERITY_TRACE("[V4] Level-Zero backend: linear copy {} bytes (immediate)", size_bytes);
 		    
 		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
@@ -319,7 +332,7 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    pooled_immediate_cmdlist cmd_list(device);
 		    
 		    ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dest, source, size_bytes, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
-		    // Wait on the event to ensure the copy is complete
+		    // FIX: Wait on the event to ensure the copy is complete before returning event to pool
 		    ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
