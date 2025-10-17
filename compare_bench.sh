@@ -9,9 +9,12 @@ set -euo pipefail
 # ============================================
 # For test_all_variants.sh results, use variant names:
 VERSIONS=(
-    "baseline"
-    "variant1"
-    "variant2"
+    "v0_baseline"
+    "v1_Event_Pooling"
+    "v2_Persistent_Event_Pool"
+    "v3_Pool_y_Event_Reuse"
+    "v4_Command_Lists_y_Persistent_Pool"
+    "v5_No_Sync"
 )
 
 
@@ -58,8 +61,9 @@ for version in "${VERSIONS[@]}"; do
     
     if [[ -d "${result_dirs[0]}" ]]; then
         echo "Analyzing ${version}..."
+        latest_dir="${result_dirs[-1]}"  # Get last (most recent) directory
         python3 scripts/analyze_results.py \
-            "results/results_${version}_"* \
+            "${latest_dir}" \
             --output "plots_${version}"
         echo "  ✓ Plots saved to: bench/plots_${version}/"
         echo ""
@@ -76,20 +80,29 @@ if [[ ${#VERSIONS[@]} -ge 2 ]]; then
     echo "=== Comparing All Versions ==="
     echo ""
     
-    # Build comparison command
+    # Build comparison command with only the newest directory for each version
     compare_cmd="python3 scripts/compare_versions.py"
+    found_versions=0
     for version in "${VERSIONS[@]}"; do
         result_dirs=(results/results_${version}_*)
         if [[ -d "${result_dirs[0]}" ]]; then
-            compare_cmd="${compare_cmd} results/results_${version}_*"
+            # Use the last (most recent) directory
+            latest_dir="${result_dirs[-1]}"
+            compare_cmd="${compare_cmd} ${latest_dir}"
+            found_versions=$((found_versions + 1))
         fi
     done
     compare_cmd="${compare_cmd} --output comparison_all"
     
-    echo "Running comparison..."
-    eval "${compare_cmd}"
-    echo "  ✓ Comparison saved to: bench/comparison_all/"
-    echo ""
+    if [[ ${found_versions} -ge 2 ]]; then
+        echo "Running comparison..."
+        eval "${compare_cmd}"
+        echo "  ✓ Comparison saved to: bench/comparison_all/"
+        echo ""
+    else
+        echo "  ⚠️  Need at least 2 versions to compare (found ${found_versions})"
+        echo ""
+    fi
 fi
 
 # ============================================
