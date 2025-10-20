@@ -55,6 +55,31 @@ fi
 
 mkdir -p "${result_dir}"
 
+# Collect device and driver information
+DEVICE_INFO=""
+DRIVER_VERSION=""
+PCIE_INFO=""
+if command -v sycl-ls &>/dev/null; then
+	DEVICE_INFO=$(sycl-ls 2>/dev/null | grep -i "level_zero\|cuda" | head -1 || echo "unknown")
+fi
+if command -v ze_info &>/dev/null; then
+	DRIVER_VERSION=$(ze_info 2>/dev/null | grep -i "driver version" | head -1 || echo "unknown")
+fi
+# Try to get PCIe info for Intel GPU
+if command -v lspci &>/dev/null; then
+	PCIE_INFO=$(lspci 2>/dev/null | grep -i "VGA\|3D\|Display" | grep -i "Intel" | head -1 || echo "unknown")
+fi
+
+# CPU info
+CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "unknown")
+CPU_CORES=$(nproc 2>/dev/null || echo "unknown")
+
+# NUMA info (if available)
+NUMA_NODES=""
+if command -v numactl &>/dev/null; then
+	NUMA_NODES=$(numactl --hardware 2>/dev/null | grep "available:" || echo "unknown")
+fi
+
 # Write metadata file
 cat > "${result_dir}/metadata.txt" << EOF
 # Benchmark Run Metadata
@@ -67,6 +92,19 @@ Git Branch: ${GIT_BRANCH}
 Hostname: $(hostname)
 User: $(whoami)
 SYCL Implementation: ${CELERITY_SYCL_IMPL:-auto-detected}
+
+# Hardware Information
+Device: ${DEVICE_INFO}
+Driver Version: ${DRIVER_VERSION}
+PCIe: ${PCIE_INFO}
+CPU: ${CPU_MODEL}
+CPU Cores: ${CPU_CORES}
+NUMA: ${NUMA_NODES}
+
+# Runtime Configuration
+CPU Affinity: ${TASKSET_CPUS:-not set}
+UR_ADAPTERS_FORCE_ORDER: ${UR_ADAPTERS_FORCE_ORDER:-not set}
+UR_DISABLE_ADAPTERS: ${UR_DISABLE_ADAPTERS:-not set}
 EOF
 
 echo "=== Benchmark Run Info ==="
