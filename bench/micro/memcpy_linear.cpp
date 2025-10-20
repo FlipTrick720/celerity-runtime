@@ -20,6 +20,11 @@ static Row run_one(sycl::queue& q, const Args& args,
 	else if (std::string(op)=="D2H"){ src=dsrc; dst=hdst; }
 	else /*D2D*/ { src=dsrc; dst=ddst; }
 	
+	// warm-up: 5 reps
+	for (int w=0; w<5; w++) {
+		q.memcpy(dst, src, bytes).wait();
+	}
+	
 	// calibrate reps
 	q.wait();
 	auto t0 = clk::now();

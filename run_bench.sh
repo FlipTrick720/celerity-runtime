@@ -36,10 +36,13 @@ echo ""
 export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
 export UR_DISABLE_ADAPTERS=OPENCL
 
+# CPU affinity (pass to run_matrix.sh for metadata)
+export TASKSET_CPUS="0-15"
+
 # Run benchmark - saves directly to bench/results/
 echo "Starting benchmark run..."
 cd bench
-ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh results
+ENABLE_CUDA=no taskset -c ${TASKSET_CPUS} ./scripts/run_matrix.sh results
 cd ..
 
 echo ""
