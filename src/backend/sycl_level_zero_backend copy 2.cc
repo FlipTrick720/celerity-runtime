@@ -133,13 +133,15 @@ void initialize_pools(const std::vector<sycl::device>& devices, ze_context_handl
 	const char* env_size = std::getenv("CELERITY_L0_EVENT_POOL_SIZE");
 	size_t pool_size = env_size ? std::atoi(env_size) : 512;
 	
-	g_event_pools.resize(devices.size());
-	g_immediate_lists.resize(devices.size());
+	g_event_pools.reserve(devices.size());
+	g_immediate_lists.reserve(devices.size());
 	
 	for (size_t i = 0; i < devices.size(); ++i) {
 		auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
+		g_event_pools.emplace_back();
 		g_event_pools[i].initialize(context, ze_device, pool_size);
-		g_immediate_lists[i].initialize(context, ze_device);  // FIXED: Actually initialize
+		g_immediate_lists.emplace_back();
+		g_immediate_lists[i].initialize(context, ze_device);
 	}
 	
 	CELERITY_DEBUG("Level-Zero V2: Initialized {} devices with immediate lists", devices.size());

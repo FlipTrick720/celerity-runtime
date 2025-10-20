@@ -140,7 +140,7 @@ void initialize_batching(const std::vector<sycl::device>& devices, ze_context_ha
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
 	if (g_pools_initialized) return;
 	
-	g_batch_managers.resize(devices.size());
+	g_batch_managers.reserve(devices.size());
 	
 	for (size_t i = 0; i < devices.size(); ++i) {
 		auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
@@ -150,6 +150,7 @@ void initialize_batching(const std::vector<sycl::device>& devices, ze_context_ha
 		auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(temp_queue);
 		auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
 		
+		g_batch_managers.emplace_back();
 		g_batch_managers[i].initialize(context, ze_device, ze_queue);
 	}
 	

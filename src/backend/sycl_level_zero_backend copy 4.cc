@@ -244,19 +244,22 @@ void initialize_all(const std::vector<sycl::device>& devices, ze_context_handle_
 	const char* env_batch = std::getenv("CELERITY_L0_USE_BATCHING");
 	if (env_batch) g_use_batching = (std::atoi(env_batch) != 0);
 	
-	g_event_pools.resize(devices.size());
-	g_immediate_lists.resize(devices.size());
-	g_batch_managers.resize(devices.size());
+	g_event_pools.reserve(devices.size());
+	g_immediate_lists.reserve(devices.size());
+	g_batch_managers.reserve(devices.size());
 	
 	for (size_t i = 0; i < devices.size(); ++i) {
 		auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
+		g_event_pools.emplace_back();
 		g_event_pools[i].initialize(context, ze_device, pool_size);
+		g_immediate_lists.emplace_back();
 		g_immediate_lists[i].initialize(context, ze_device);
 		
 		if (g_use_batching) {
 			sycl::queue temp_queue(devices[i]);
 			auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(temp_queue);
 			auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+			g_batch_managers.emplace_back();
 			g_batch_managers[i].initialize(context, ze_device, ze_queue);
 		}
 	}
