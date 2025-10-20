@@ -1,7 +1,5 @@
-// VARIANT 2: Persistent Event Pool (Professor's suggestion)
-// Goal: One persistent ze_event_pool per device, events created/destroyed per copy
-// Implementation: Pool persists, but events are created fresh and destroyed after each operation
-// Hypothesis: Small to moderate gain from avoiding pool creation overhead
+//Version: v2_Persistent_Event_Pool
+//Text: One persistent ze_event_pool per device, events created/destroyed per copy. Pool persists, but events are created fresh and destroyed after each operation.
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"

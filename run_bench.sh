@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Run benchmarks on server
+# Saves CSVs directly to bench/results/ for later analysis
+
+set -euo pipefail
+
+# Read version from backend source
+BACKEND_SOURCE="src/backend/sycl_level_zero_backend.cc"
+VERSION="unknown"
+if [[ -f "${BACKEND_SOURCE}" ]]; then
+    VERSION=$(grep -m1 "^//Version:" "${BACKEND_SOURCE}" 2>/dev/null | sed 's/^\/\/Version: *//' | tr -d '\r\n' || echo "unknown")
+fi
+
+echo "========================================="
+echo "Running Backend Benchmarks"
+echo "========================================="
+echo "Backend Version: ${VERSION}"
+echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
+echo ""
+
+# Check if benchmarks are built, build if needed
+if [[ ! -f "bench/build/memcpy_linear" ]] || [[ ! -f "bench/build/event_overhead" ]]; then
+    echo "Building benchmarks..."
+    if ! (cd bench && ./build_bench.sh) > /dev/null 2>&1; then
+        echo "Error: Benchmark build failed"
+        echo "Run manually: cd bench && ./build_bench.sh"
+        exit 1
+    fi
+    echo "✓ Build complete"
+else
+    echo "✓ Benchmarks already built (bench/build/)"
+fi
+echo ""
+
+# Reproducibility settings
+export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
+export UR_DISABLE_ADAPTERS=OPENCL
+
+# CPU affinity (pass to run_matrix.sh for metadata)
+export TASKSET_CPUS="0-15"
+
+# Run benchmark - saves directly to bench/results/
+echo "Starting benchmark run..."
+cd bench
+ENABLE_CUDA=no taskset -c ${TASKSET_CPUS} ./scripts/run_matrix.sh results
+cd ..
+
+echo ""
+echo "========================================="
+echo "Benchmark Complete!"
+echo "========================================="
+echo "Results saved to: bench/results/results_${VERSION}_*"
+

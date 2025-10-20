@@ -1,7 +1,5 @@
-// VARIANT 4: Immediate Command Lists + Persistent Pool
-// Goal: Use zeCommandListCreateImmediate (persistent per device)
-// Implementation: Immediate command lists with persistent event pool
-// Hypothesis: Significantly less host overhead per submit
+//Version: v4_Command_Lists_y_Persistent_Pool
+//Text: Use zeCommandListCreateImmediate (persistent per device). Immediate command lists with persistent event pool
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -75,11 +73,11 @@ public:
 	ze_event_handle_t get_event() {
 		std::lock_guard<std::mutex> lock(m_mutex);
 		
-		// Try to reuse from free list
+		// Try to reuse from free list (already reset by release())
 		if(!m_free_events.empty()) {
 			auto event = m_free_events.back();
 			m_free_events.pop_back();
-			zeEventHostReset(event);
+			// FIX: Event already reset in release(), no need to reset again
 			return event;
 		}
 		
@@ -186,12 +184,24 @@ public:
 	}
 	
 	~pooled_event() {
-		if(m_event) {
+		if(m_event && !m_released) {
+			// FIX: Should not happen - event should be explicitly released after sync
+			CELERITY_WARN("[V4] Event returned to pool without explicit release - possible bug");
 			get_immediate_pool(m_device).return_event(m_event);
 		}
 	}
 	
 	ze_event_handle_t get() const { return m_event; }
+	
+	// FIX: Explicit release after synchronization
+	void release() {
+		if(m_event && !m_released) {
+			// Event must be synchronized and reset before returning to pool
+			zeEventHostReset(m_event);
+			get_immediate_pool(m_device).return_event(m_event);
+			m_released = true;
+		}
+	}
 	
 	pooled_event(const pooled_event&) = delete;
 	pooled_event& operator=(const pooled_event&) = delete;
@@ -199,6 +209,7 @@ public:
 private:
 	device_id m_device;
 	ze_event_handle_t m_event = nullptr;
+	bool m_released = false;
 };
 
 class pooled_immediate_cmdlist {
@@ -241,7 +252,12 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 	
 	const auto layout = layout_nd_copy(src_range, dst_range, src_offset, dst_offset, copy_range, elem_size);
 	
-	if(layout.contiguous_size == 0) return;
+	// FIX: Guard against empty work
+	if(layout.contiguous_size == 0) {
+		CELERITY_TRACE("[V4] Level-Zero backend: empty copy, skipping");
+		last_event = queue.ext_oneapi_submit_barrier();
+		return;
+	}
 	
 	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
 	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
@@ -294,9 +310,13 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		CELERITY_TRACE("[V4] Level-Zero backend: 3D copy {} chunks (immediate)", chunks.size());
 	}
 	
-	// Immediate command lists execute synchronously, but we still sync to be safe
-	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+	// FIX: Wait for completion, then explicitly release event back to pool
+	ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
 	
+	// Explicitly release event (resets and returns to pool)
+	ze_event.release();
+	
+	// Now create the SYCL barrier
 	last_event = queue.ext_oneapi_submit_barrier();
 }
 
@@ -311,6 +331,13 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    nd_copy_box_level_zero(queue, device, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
 	    [&queue, device, &last_event](const void* const source, void* const dest, size_t size_bytes) {
+		    // FIX: Guard against empty work
+		    if(size_bytes == 0) {
+			    CELERITY_TRACE("[V4] Level-Zero backend: empty linear copy, skipping");
+			    last_event = queue.ext_oneapi_submit_barrier();
+			    return;
+		    }
+		    
 		    CELERITY_TRACE("[V4] Level-Zero backend: linear copy {} bytes (immediate)", size_bytes);
 		    
 		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
@@ -320,7 +347,10 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    pooled_immediate_cmdlist cmd_list(device);
 		    
 		    ze_check(zeCommandListAppendMemoryCopy(cmd_list.get(), dest, source, size_bytes, ze_event.get(), 0, nullptr), "zeCommandListAppendMemoryCopy");
-		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+		    
+		    // FIX: Wait for completion, then explicitly release event back to pool
+		    ze_check(zeEventHostSynchronize(ze_event.get(), UINT64_MAX), "zeEventHostSynchronize");
+		    ze_event.release();
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
