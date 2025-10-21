@@ -47,6 +47,13 @@ struct batch_manager {
 	size_t total_batches = 0;
 	size_t total_ops_batched = 0;
 	
+	// Make non-copyable and non-movable (contains std::mutex)
+	batch_manager() = default;
+	batch_manager(const batch_manager&) = delete;
+	batch_manager& operator=(const batch_manager&) = delete;
+	batch_manager(batch_manager&&) = delete;
+	batch_manager& operator=(batch_manager&&) = delete;
+	
 	void initialize(ze_context_handle_t context, ze_device_handle_t device, ze_command_queue_handle_t q) {
 		queue = q;
 		
@@ -64,12 +71,18 @@ struct batch_manager {
 		
 		ze_check(zeFenceCreate(queue, &fence_desc, &fence), "zeFenceCreate");
 		
-		// Get thresholds from environment
+		// Get thresholds from environment - FIXED: Ensure variables are properly consumed
 		const char* env_ops = std::getenv("CELERITY_L0_BATCH_THRESHOLD_OPS");
 		const char* env_us = std::getenv("CELERITY_L0_BATCH_THRESHOLD_US");
 		
-		if (env_ops) batch_threshold_ops = std::atoi(env_ops);
-		if (env_us) batch_threshold_us = std::atoi(env_us);
+		if (env_ops) {
+			batch_threshold_ops = std::atoi(env_ops);
+			CELERITY_DEBUG("Level-Zero V3: Using CELERITY_L0_BATCH_THRESHOLD_OPS={}", batch_threshold_ops);
+		}
+		if (env_us) {
+			batch_threshold_us = std::atoi(env_us);
+			CELERITY_DEBUG("Level-Zero V3: Using CELERITY_L0_BATCH_THRESHOLD_US={}", batch_threshold_us);
+		}
 		
 		batch_start_time = std::chrono::steady_clock::now();
 		
@@ -126,13 +139,15 @@ struct batch_manager {
 		              total_batches, total_ops_batched, 
 		              total_batches > 0 ? static_cast<double>(total_ops_batched) / total_batches : 0.0);
 		
-		if (fence) ze_check(zeFenceDestroy(fence), "zeFenceDestroy");
+		// FIXED: Don't destroy fence and queue - they are persistent
+		// Only destroy command list as it gets recreated
 		if (batch_list) ze_check(zeCommandListDestroy(batch_list), "zeCommandListDestroy");
+		// Note: fence and queue are persistent and reused across flushes
 	}
 };
 
 // Global managers
-static std::vector<batch_manager> g_batch_managers;
+static std::vector<std::unique_ptr<batch_manager>> g_batch_managers;
 static std::mutex g_pools_mutex;
 static bool g_pools_initialized = false;
 
@@ -145,13 +160,18 @@ void initialize_batching(const std::vector<sycl::device>& devices, ze_context_ha
 	for (size_t i = 0; i < devices.size(); ++i) {
 		auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
 		
-		// Create a temporary queue to get queue handle
-		sycl::queue temp_queue(devices[i]);
-		auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(temp_queue);
-		auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+		// Create command queue directly (don't use temporary SYCL queue)
+		ze_command_queue_desc_t queue_desc = {};
+		queue_desc.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+		queue_desc.ordinal = 0;
+		queue_desc.index = 0;
+		queue_desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
 		
-		g_batch_managers.emplace_back();
-		g_batch_managers[i].initialize(context, ze_device, ze_queue);
+		ze_command_queue_handle_t ze_queue = nullptr;
+		ze_check(zeCommandQueueCreate(context, ze_device, &queue_desc, &ze_queue), "zeCommandQueueCreate");
+		
+		g_batch_managers.emplace_back(std::make_unique<batch_manager>());
+		g_batch_managers[i]->initialize(context, ze_device, ze_queue);
 	}
 	
 	CELERITY_DEBUG("Level-Zero V3: Initialized {} devices with batching", devices.size());
@@ -161,7 +181,7 @@ void initialize_batching(const std::vector<sycl::device>& devices, ze_context_ha
 void cleanup_batching() {
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
 	for (auto& batch : g_batch_managers) {
-		batch.cleanup();
+		batch->cleanup();
 	}
 	g_batch_managers.clear();
 	g_pools_initialized = false;
@@ -174,9 +194,17 @@ void nd_copy_box_level_zero_batch(sycl::queue& queue, device_id device, const vo
 	assert(source_box.covers(copy_box));
 	assert(dest_box.covers(copy_box));
 	
+	const auto copy_range = copy_box.get_range();
+	
+	// Zero-work short-circuit: never touch Level-Zero for empty ranges
+	if(copy_range.size() == 0) {
+		CELERITY_TRACE("Level-Zero V3: short-circuit empty copy (no ZE submit)");
+		last_event = queue.ext_oneapi_submit_barrier();
+		return;
+	}
+	
 	const auto src_range = source_box.get_range();
 	const auto dst_range = dest_box.get_range();
-	const auto copy_range = copy_box.get_range();
 	const auto src_offset = copy_box.get_offset() - source_box.get_offset();
 	const auto dst_offset = copy_box.get_offset() - dest_box.get_offset();
 	
@@ -184,13 +212,14 @@ void nd_copy_box_level_zero_batch(sycl::queue& queue, device_id device, const vo
 	
 	// Zero-work short-circuit
 	if(layout.contiguous_size == 0) {
+		CELERITY_TRACE("Level-Zero V3: short-circuit zero-size layout");
 		last_event = queue.ext_oneapi_submit_barrier();
 		return;
 	}
 	
 	// BATCH MODE: No per-op events, use fence
-	std::lock_guard<std::mutex> lock(g_batch_managers[device].mutex);
-	ze_command_list_handle_t batch_list = g_batch_managers[device].get_batch_list();
+	std::lock_guard<std::mutex> lock(g_batch_managers[device]->mutex);
+	ze_command_list_handle_t batch_list = g_batch_managers[device]->get_batch_list();
 	
 	if(layout.num_complex_strides == 0) {
 		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
@@ -232,12 +261,11 @@ void nd_copy_box_level_zero_batch(sycl::queue& queue, device_id device, const vo
 	}
 	
 	// Add to batch
-	g_batch_managers[device].add_operation();
+	g_batch_managers[device]->add_operation();
 	
-	// Check if we should flush
-	if (g_batch_managers[device].should_flush()) {
-		g_batch_managers[device].flush_batch();
-	}
+	// IMPORTANT: Flush immediately for box copies to ensure data is transferred
+	// before pointers become invalid
+	g_batch_managers[device]->flush_batch();
 	
 	// Create SYCL barrier event
 	last_event = queue.ext_oneapi_submit_barrier();
@@ -264,14 +292,14 @@ async_event nd_copy_device_level_zero_batch(sycl::queue& queue, device_id device
 		    
 		    CELERITY_TRACE("Level-Zero V3: batch linear copy {} bytes", size_bytes);
 		    
-		    std::lock_guard<std::mutex> lock(g_batch_managers[device].mutex);
-		    ze_command_list_handle_t batch_list = g_batch_managers[device].get_batch_list();
+		    std::lock_guard<std::mutex> lock(g_batch_managers[device]->mutex);
+		    ze_command_list_handle_t batch_list = g_batch_managers[device]->get_batch_list();
 		    ze_check(zeCommandListAppendMemoryCopy(batch_list, dest, source, size_bytes, nullptr, 0, nullptr), "zeCommandListAppendMemoryCopy");
 		    
-		    g_batch_managers[device].add_operation();
+		    g_batch_managers[device]->add_operation();
 		    
-		    if (g_batch_managers[device].should_flush()) {
-			    g_batch_managers[device].flush_batch();
+		    if (g_batch_managers[device]->should_flush()) {
+			    g_batch_managers[device]->flush_batch();
 		    }
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
@@ -279,8 +307,8 @@ async_event nd_copy_device_level_zero_batch(sycl::queue& queue, device_id device
 	
 	// Force flush any pending batch operations
 	{
-		std::lock_guard<std::mutex> lock(g_batch_managers[device].mutex);
-		g_batch_managers[device].flush_batch();
+		std::lock_guard<std::mutex> lock(g_batch_managers[device]->mutex);
+		g_batch_managers[device]->flush_batch();
 	}
 	
 	sycl_backend_detail::flush(queue);

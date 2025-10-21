@@ -15,6 +15,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdlib>
+#include <memory>
 #include <utility>
 #include <vector>
 #include <queue>
@@ -42,6 +43,13 @@ struct event_pool_manager {
 	std::mutex mutex;
 	size_t peak_usage = 0;
 	size_t total_acquires = 0;
+	
+	// Make non-copyable and non-movable (contains std::mutex)
+	event_pool_manager() = default;
+	event_pool_manager(const event_pool_manager&) = delete;
+	event_pool_manager& operator=(const event_pool_manager&) = delete;
+	event_pool_manager(event_pool_manager&&) = delete;
+	event_pool_manager& operator=(event_pool_manager&&) = delete;
 	
 	void initialize(ze_context_handle_t context, ze_device_handle_t device, size_t pool_size) {
 		// Create persistent pool
@@ -109,8 +117,8 @@ struct event_pool_manager {
 	}
 };
 
-// Global pools (one per device)
-static std::vector<event_pool_manager> g_event_pools;
+// Global pools (one per device) - use unique_ptr because event_pool_manager contains std::mutex
+static std::vector<std::unique_ptr<event_pool_manager>> g_event_pools;
 static std::mutex g_pools_mutex;
 static bool g_pools_initialized = false;
 
@@ -128,8 +136,8 @@ void initialize_event_pools(const std::vector<sycl::device>& devices, ze_context
 	
 	for (size_t i = 0; i < devices.size(); ++i) {
 		auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
-		g_event_pools.emplace_back();
-		g_event_pools[i].initialize(context, ze_device, pool_size);
+		g_event_pools.emplace_back(std::make_unique<event_pool_manager>());
+		g_event_pools[i]->initialize(context, ze_device, pool_size);
 	}
 	
 	g_pools_initialized = true;
@@ -138,7 +146,7 @@ void initialize_event_pools(const std::vector<sycl::device>& devices, ze_context
 void cleanup_event_pools() {
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
 	for (auto& pool : g_event_pools) {
-		pool.cleanup();
+		pool->cleanup();
 	}
 	g_event_pools.clear();
 	g_pools_initialized = false;
@@ -173,8 +181,8 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 	auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
 	
 	// Acquire event from pool
-	size_t event_idx = g_event_pools[device].acquire();
-	ze_event_handle_t ze_event = g_event_pools[device].get_event(event_idx);
+	size_t event_idx = g_event_pools[device]->acquire();
+	ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
 	
 	// Create command list
 	ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
@@ -233,7 +241,7 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 	
 	// Release event back to pool
-	g_event_pools[device].release(event_idx);
+	g_event_pools[device]->release(event_idx);
 	
 	// Create SYCL barrier event
 	last_event = queue.ext_oneapi_submit_barrier();
@@ -266,8 +274,8 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
 		    
 		    // Acquire event from pool
-		    size_t event_idx = g_event_pools[device].acquire();
-		    ze_event_handle_t ze_event = g_event_pools[device].get_event(event_idx);
+		    size_t event_idx = g_event_pools[device]->acquire();
+		    ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
 		    
 		    ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
 		    ze_command_list_handle_t cmd_list = nullptr;
@@ -280,7 +288,7 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 		    
 		    // Release event back to pool
-		    g_event_pools[device].release(event_idx);
+		    g_event_pools[device]->release(event_idx);
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
