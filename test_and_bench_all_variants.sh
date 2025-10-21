@@ -46,6 +46,42 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     echo "Testing: $variant"
     echo "========================================="
     
+    # Clear previous variant's env vars
+    unset CELERITY_L0_EVENT_POOL_SIZE
+    unset CELERITY_L0_BATCH_THRESHOLD_OPS
+    unset CELERITY_L0_BATCH_THRESHOLD_US
+    unset CELERITY_L0_MICRO_THRESHOLD
+    unset CELERITY_L0_SMALL_THRESHOLD
+    unset CELERITY_L0_USE_BATCHING
+    
+    case "$variant" in
+        variant1)
+            export CELERITY_L0_EVENT_POOL_SIZE=512
+            ;;
+            
+        variant2)
+            export CELERITY_L0_EVENT_POOL_SIZE=512
+            ;;
+            
+        variant3)
+            export CELERITY_L0_BATCH_THRESHOLD_OPS=8
+            export CELERITY_L0_BATCH_THRESHOLD_US=100
+            ;;
+            
+        variant4)
+            export CELERITY_L0_EVENT_POOL_SIZE=512
+            export CELERITY_L0_MICRO_THRESHOLD=256
+            export CELERITY_L0_SMALL_THRESHOLD=4096
+            export CELERITY_L0_BATCH_THRESHOLD_OPS=8
+            export CELERITY_L0_BATCH_THRESHOLD_US=100
+            export CELERITY_L0_USE_BATCHING=1
+            ;;
+            
+        *)
+            echo "Unknown variant: $variant"
+            ;;
+    esac
+    
     if [[ "$variant" != "baseline" ]]; then
         echo "Installing $variant files..."
         cp "${VARIANTS[$variant]}" src/backend/sycl_level_zero_backend.cc
@@ -154,31 +190,3 @@ done
 
 echo ""
 echo "Benchmark results: bench/results/"
-FOUND_VARIANTS=()
-for variant in baseline variant1 variant2 variant3 variant4 variant5; do
-    result_dir=$(ls -d bench/results/results_${variant}_* 2>/dev/null | tail -1)
-    if [ -n "$result_dir" ]; then
-        echo "  ${variant}: ${result_dir}"
-        FOUND_VARIANTS+=("\"${variant}\"")
-    fi
-done
-
-echo ""
-echo "========================================="
-echo "Next Steps - Local Analysis"
-echo "========================================="
-echo ""
-echo "1. Download results from server:"
-echo "   scp -r server:path/to/bench/results/ bench/"
-echo ""
-echo "2. Edit compare_bench.sh and set:"
-echo "   VERSIONS=(${FOUND_VARIANTS[@]})"
-echo ""
-echo "3. Run analysis:"
-echo "   ./compare_bench.sh"
-echo ""
-echo "This will generate:"
-echo "  - Individual plots: bench/plots_<variant>/"
-echo "  - Comparison plots: bench/comparison_all/"
-echo "  - Summary tables: bench/plots_*/summary_statistics.csv"
-echo ""
