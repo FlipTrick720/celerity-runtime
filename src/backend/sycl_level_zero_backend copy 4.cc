@@ -89,6 +89,10 @@ struct event_pool_manager {
 		free_indices.pop();
 		total_acquires++;
 		peak_usage = std::max(peak_usage, events.size() - free_indices.size());
+		
+		// CRITICAL: Reset event before reuse
+		ze_check(zeEventHostReset(events[idx]), "zeEventHostReset");
+		
 		return idx;
 	}
 	
@@ -420,8 +424,8 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 			         "zeCommandListAppendMemoryCopyRegion");
 		}
 		
+		// Wait for completion and release event
 		ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
-		ze_check(zeEventHostReset(ze_event), "zeEventHostReset");
 		g_event_pools[device]->release(event_idx);
 		
 		CELERITY_TRACE("Level-Zero V4: immediate small copy {} bytes", total_bytes);
@@ -513,9 +517,8 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 			    ze_command_list_handle_t cmd_list = g_immediate_lists[device]->get();
 			    
 			    ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+			    // Wait for completion and release event
 			    ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
-			    ze_check(zeEventHostReset(ze_event), "zeEventHostReset");
-			    
 			    g_event_pools[device]->release(event_idx);
 			    
 			    CELERITY_TRACE("Level-Zero V4: immediate linear copy {} bytes", size_bytes);
