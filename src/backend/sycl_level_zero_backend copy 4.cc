@@ -265,15 +265,20 @@ void initialize_all(const std::vector<sycl::device>& devices, ze_context_handle_
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
 	if (g_pools_initialized) return;
 	
-	// FIXED: Read all environment variables with proper consumption
+	// For tests: disable immediate/batch optimizations to ensure correctness
+	// These optimizations bypass SYCL queue ordering and can race with kernels
+	// Only enable them via environment variables for benchmarks
 	const char* env_size = std::getenv("CELERITY_L0_EVENT_POOL_SIZE");
 	const char* env_micro = std::getenv("CELERITY_L0_MICRO_THRESHOLD");
 	const char* env_small = std::getenv("CELERITY_L0_SMALL_THRESHOLD");
 	const char* env_batch = std::getenv("CELERITY_L0_USE_BATCHING");
-	const char* env_batch_ops = std::getenv("CELERITY_L0_BATCH_THRESHOLD_OPS");
-	const char* env_batch_us = std::getenv("CELERITY_L0_BATCH_THRESHOLD_US");
 	
 	size_t pool_size = env_size ? std::atoi(env_size) : 512;
+	
+	// Disable micro/small/batch by default for correctness
+	g_micro_threshold = 0;  // Disable micro-copy
+	g_small_threshold = 0;  // Disable immediate lists
+	g_use_batching = false; // Disable batching
 	
 	if (env_micro) {
 		g_micro_threshold = std::atoi(env_micro);
@@ -286,12 +291,6 @@ void initialize_all(const std::vector<sycl::device>& devices, ze_context_handle_
 	if (env_batch) {
 		g_use_batching = (std::atoi(env_batch) != 0);
 		CELERITY_DEBUG("Level-Zero V4: Using CELERITY_L0_USE_BATCHING={}", g_use_batching);
-	}
-	if (env_batch_ops) {
-		CELERITY_DEBUG("Level-Zero V4: CELERITY_L0_BATCH_THRESHOLD_OPS={} (will be used by batch managers)", env_batch_ops);
-	}
-	if (env_batch_us) {
-		CELERITY_DEBUG("Level-Zero V4: CELERITY_L0_BATCH_THRESHOLD_US={} (will be used by batch managers)", env_batch_us);
 	}
 	
 	g_event_pools.reserve(devices.size());
@@ -394,8 +393,8 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		}
 	}
 	
-	// Small copy: use immediate list
-	if (total_bytes <= g_small_threshold) {
+	// Small copy: use immediate list (only if enabled via env var)
+	if (g_small_threshold > 0 && total_bytes <= g_small_threshold) {
 		size_t event_idx = g_event_pools[device]->acquire();
 		ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
 		
@@ -433,52 +432,71 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		return;
 	}
 	
-	// Large copy: use batching if enabled
-	if (g_use_batching) {
-		std::lock_guard<std::mutex> lock(g_batch_managers[device]->mutex);
-		ze_command_list_handle_t batch_list = g_batch_managers[device]->get_batch_list();
+	// Default: use regular command list on native ZE queue (safe, maintains SYCL queue ordering)
+	// Get native Level Zero handles from SYCL queue
+	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
+	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+	auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
+	auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+	
+	size_t event_idx = g_event_pools[device]->acquire();
+	ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
+	
+	// Create regular command list (not immediate) for proper queue ordering
+	ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
+	ze_command_list_handle_t cmd_list = nullptr;
+	ze_check(zeCommandListCreate(ze_context, ze_device, &cmd_list_desc, &cmd_list), "zeCommandListCreate");
+	
+	// Append copy operations to command list
+	if(layout.num_complex_strides == 0) {
+		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
+		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
+		ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		CELERITY_TRACE("Level-Zero V4: contiguous copy {} bytes", layout.contiguous_size);
+	} else if(layout.num_complex_strides == 1) {
+		const auto& stride = layout.strides[0];
+		const size_t width = layout.contiguous_size;
+		const size_t height = stride.count;
+		const size_t src_pitch = stride.source_stride;
+		const size_t dst_pitch = stride.dest_stride;
 		
-		if(layout.num_complex_strides == 0) {
-			const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
-			void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
-			ze_check(zeCommandListAppendMemoryCopy(batch_list, dst_ptr, src_ptr, layout.contiguous_size, nullptr, 0, nullptr), "zeCommandListAppendMemoryCopy");
-		} else if(layout.num_complex_strides == 1) {
-			const auto& stride = layout.strides[0];
-			const size_t width = layout.contiguous_size;
-			const size_t height = stride.count;
-			const size_t src_pitch = stride.source_stride;
-			const size_t dst_pitch = stride.dest_stride;
-			
-			const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
-			void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
-			
-			ze_copy_region_t src_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-			ze_copy_region_t dst_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-			
-			ze_check(zeCommandListAppendMemoryCopyRegion(batch_list, dst_ptr, &dst_region, dst_pitch, 0,
-			                                             src_ptr, &src_region, src_pitch, 0, nullptr, 0, nullptr), 
-			         "zeCommandListAppendMemoryCopyRegion");
-		} else {
-			std::vector<std::tuple<size_t, size_t, size_t>> chunks;
-			for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
-				chunks.emplace_back(src_off, dst_off, size);
-			});
-			
-			for(const auto& [src_off, dst_off, size] : chunks) {
-				const void* src_ptr = static_cast<const char*>(source_base) + src_off;
-				void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
-				ze_check(zeCommandListAppendMemoryCopy(batch_list, dst_ptr, src_ptr, size, nullptr, 0, nullptr), "zeCommandListAppendMemoryCopy");
-			}
+		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
+		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
+		
+		ze_copy_region_t src_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+		ze_copy_region_t dst_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+		
+		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list, dst_ptr, &dst_region, dst_pitch, 0,
+		                                             src_ptr, &src_region, src_pitch, 0, ze_event, 0, nullptr), 
+		         "zeCommandListAppendMemoryCopyRegion");
+		CELERITY_TRACE("Level-Zero V4: 2D copy {}x{} bytes", width, height);
+	} else {
+		std::vector<std::tuple<size_t, size_t, size_t>> chunks;
+		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
+			chunks.emplace_back(src_off, dst_off, size);
+		});
+		
+		for(size_t i = 0; i < chunks.size(); ++i) {
+			const auto& [src_off, dst_off, size] = chunks[i];
+			const void* src_ptr = static_cast<const char*>(source_base) + src_off;
+			void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
+			const bool is_last = (i == chunks.size() - 1);
+			ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
+			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
 		}
-		
-		g_batch_managers[device]->add_operation();
-		
-		// IMPORTANT: Flush immediately for box copies to ensure data is transferred
-		// before pointers become invalid
-		g_batch_managers[device]->flush_batch();
-		
-		CELERITY_TRACE("Level-Zero V4: batch large copy {} bytes", total_bytes);
+		CELERITY_TRACE("Level-Zero V4: 3D copy {} chunks", chunks.size());
 	}
+	
+	// Execute command list on the native ZE queue (maintains SYCL queue ordering)
+	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
+	
+	// Synchronize to ensure completion
+	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+	
+	// Clean up
+	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
+	g_event_pools[device]->release(event_idx);
 	
 	last_event = queue.ext_oneapi_submit_barrier();
 }

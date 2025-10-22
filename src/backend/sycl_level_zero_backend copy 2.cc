@@ -104,43 +104,7 @@ struct event_pool_manager {
 	}
 };
 
-// Immediate command list manager (NEW in V2) - FIXED to actually persist
-struct immediate_cmdlist_manager {
-	ze_command_list_handle_t immediate_list = nullptr;
-	std::mutex mutex;  // Protect concurrent access
-	size_t operations_count = 0;
-	
-	// Make non-copyable and non-movable (contains std::mutex)
-	immediate_cmdlist_manager() = default;
-	immediate_cmdlist_manager(const immediate_cmdlist_manager&) = delete;
-	immediate_cmdlist_manager& operator=(const immediate_cmdlist_manager&) = delete;
-	immediate_cmdlist_manager(immediate_cmdlist_manager&&) = delete;
-	immediate_cmdlist_manager& operator=(immediate_cmdlist_manager&&) = delete;
-	
-	void initialize(ze_context_handle_t context, ze_device_handle_t device) {
-		ze_command_queue_desc_t queue_desc = {};
-		queue_desc.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
-		queue_desc.ordinal = 0;
-		queue_desc.index = 0;
-		queue_desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
-		
-		ze_check(zeCommandListCreateImmediate(context, device, &queue_desc, &immediate_list), "zeCommandListCreateImmediate");
-		CELERITY_DEBUG("Level-Zero V2: Created persistent immediate command list");
-	}
-	
-	ze_command_list_handle_t get() { 
-		operations_count++;
-		return immediate_list; 
-	}
-	
-	void cleanup() {
-		CELERITY_DEBUG("Level-Zero V2: Immediate list executed {} operations", operations_count);
-		if (immediate_list) zeCommandListDestroy(immediate_list);
-	}
-};
-
 static std::vector<std::unique_ptr<event_pool_manager>> g_event_pools;
-static std::vector<std::unique_ptr<immediate_cmdlist_manager>> g_immediate_lists;
 static std::mutex g_pools_mutex;
 static bool g_pools_initialized = false;
 
@@ -157,26 +121,21 @@ void initialize_pools(const std::vector<sycl::device>& devices, ze_context_handl
 	}
 	
 	g_event_pools.reserve(devices.size());
-	g_immediate_lists.reserve(devices.size());
 	
 	for (size_t i = 0; i < devices.size(); ++i) {
 		auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
 		g_event_pools.emplace_back(std::make_unique<event_pool_manager>());
 		g_event_pools[i]->initialize(context, ze_device, pool_size);
-		g_immediate_lists.emplace_back(std::make_unique<immediate_cmdlist_manager>());
-		g_immediate_lists[i]->initialize(context, ze_device);
 	}
 	
-	CELERITY_DEBUG("Level-Zero V2: Initialized {} devices with immediate lists", devices.size());
+	CELERITY_DEBUG("Level-Zero V2: Initialized {} devices with event pools", devices.size());
 	g_pools_initialized = true;
 }
 
 void cleanup_pools() {
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
 	for (auto& pool : g_event_pools) pool->cleanup();
-	for (auto& list : g_immediate_lists) list->cleanup();
 	g_event_pools.clear();
-	g_immediate_lists.clear();
 	g_pools_initialized = false;
 }
 
@@ -208,18 +167,26 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		return;
 	}
 	
+	// Get native Level Zero handles from SYCL queue
+	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
+	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+	auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
+	auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+	
+	// Acquire event from pool (already reset in acquire())
 	size_t event_idx = g_event_pools[device]->acquire();
 	ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
 	
-	// Use persistent immediate command list (FIXED)
-	std::lock_guard<std::mutex> lock(g_immediate_lists[device]->mutex);
-	ze_command_list_handle_t cmd_list = g_immediate_lists[device]->get();
+	// Create regular command list (not immediate) for proper queue ordering
+	ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
+	ze_command_list_handle_t cmd_list = nullptr;
+	ze_check(zeCommandListCreate(ze_context, ze_device, &cmd_list_desc, &cmd_list), "zeCommandListCreate");
 	
 	if(layout.num_complex_strides == 0) {
 		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
 		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
 		ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
-		CELERITY_TRACE("Level-Zero V2: immediate contiguous copy {} bytes", layout.contiguous_size);
+		CELERITY_TRACE("Level-Zero V2: contiguous copy {} bytes", layout.contiguous_size);
 	} else if(layout.num_complex_strides == 1) {
 		const auto& stride = layout.strides[0];
 		const size_t width = layout.contiguous_size;
@@ -236,7 +203,7 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list, dst_ptr, &dst_region, dst_pitch, 0,
 		                                             src_ptr, &src_region, src_pitch, 0, ze_event, 0, nullptr), 
 		         "zeCommandListAppendMemoryCopyRegion");
-		CELERITY_TRACE("Level-Zero V2: immediate 2D copy {}x{} bytes", width, height);
+		CELERITY_TRACE("Level-Zero V2: 2D copy {}x{} bytes", width, height);
 	} else {
 		std::vector<std::tuple<size_t, size_t, size_t>> chunks;
 		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
@@ -251,11 +218,18 @@ void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* co
 			ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
 			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
 		}
-		CELERITY_TRACE("Level-Zero V2: immediate 3D copy {} chunks", chunks.size());
+		CELERITY_TRACE("Level-Zero V2: 3D copy {} chunks", chunks.size());
 	}
 	
-	// Wait for completion and release event
-	ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
+	// Execute command list on the native ZE queue (maintains SYCL queue ordering)
+	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
+	
+	// Synchronize to ensure completion
+	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+	
+	// Clean up
+	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 	g_event_pools[device]->release(event_idx);
 	
 	// Return barrier event for SYCL dependency tracking
@@ -281,18 +255,34 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 			    return;
 		    }
 		    
-		    CELERITY_TRACE("Level-Zero V2: immediate linear copy {} bytes", size_bytes);
+		    CELERITY_TRACE("Level-Zero V2: linear copy {} bytes", size_bytes);
 		    
+		    // Get native Level Zero handles from SYCL queue
+		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
+		    auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+		    auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
+		    auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+		    
+		    // Acquire event from pool (already reset in acquire())
 		    size_t event_idx = g_event_pools[device]->acquire();
 		    ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
 		    
-		    std::lock_guard<std::mutex> lock(g_immediate_lists[device]->mutex);
-		    ze_command_list_handle_t cmd_list = g_immediate_lists[device]->get();
+		    // Create regular command list (not immediate) for proper queue ordering
+		    ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
+		    ze_command_list_handle_t cmd_list = nullptr;
+		    ze_check(zeCommandListCreate(ze_context, ze_device, &cmd_list_desc, &cmd_list), "zeCommandListCreate");
 		    
 		    ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
 		    
-		    // Wait for completion and release event
-		    ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
+		    // Execute command list on the native ZE queue (maintains SYCL queue ordering)
+		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
+		    
+		    // Synchronize to ensure completion
+		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+		    
+		    // Clean up
+		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
 		    g_event_pools[device]->release(event_idx);
 		    
 		    // Return barrier event for SYCL dependency tracking
