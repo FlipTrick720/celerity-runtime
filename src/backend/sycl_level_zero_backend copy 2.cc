@@ -144,8 +144,13 @@ void initialize_pools(const std::vector<sycl::device>& devices, ze_context_handl
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
 	if (g_pools_initialized) return;
 	
+	// FIXED: Ensure environment variable is properly consumed
 	const char* env_size = std::getenv("CELERITY_L0_EVENT_POOL_SIZE");
 	size_t pool_size = env_size ? std::atoi(env_size) : 512;
+	
+	if (env_size) {
+		CELERITY_DEBUG("Level-Zero V2: Using CELERITY_L0_EVENT_POOL_SIZE={}", pool_size);
+	}
 	
 	g_event_pools.reserve(devices.size());
 	g_immediate_lists.reserve(devices.size());

@@ -343,17 +343,21 @@ bool try_micro_copy(const void* source, void* dest, size_t size_bytes, device_id
 	}
 	if (size_bytes > g_micro_threshold) return false;
 	
-	// FIXED: Only use memcpy for very small sizes and ensure pointers are valid
-	// This is a conservative approach - only bypass for truly tiny copies
-	if (size_bytes <= 64) {  // Very conservative threshold
-		std::memcpy(dest, source, size_bytes);
-		
-		if (g_use_batching) {
-			g_batch_managers[device]->record_micro_bypass();
-		}
-		CELERITY_TRACE("Level-Zero V4: micro-copy bypass {} bytes", size_bytes);
-		return true;
-	}
+	// FIXED: Disable micro-copy to prevent SIGSEGV on device memory
+	// Device memory is not directly accessible from host, so memcpy will segfault
+	// This optimization is only safe for host-to-host copies, which we can't detect reliably
+	// For now, disable this optimization entirely to prevent crashes
+	return false;
+	
+	// Original micro-copy code (disabled for safety):
+	// if (size_bytes <= 64) {
+	//     std::memcpy(dest, source, size_bytes);
+	//     if (g_use_batching) {
+	//         g_batch_managers[device]->record_micro_bypass();
+	//     }
+	//     CELERITY_TRACE("Level-Zero V4: micro-copy bypass {} bytes", size_bytes);
+	//     return true;
+	// }
 	
 	return false;
 }

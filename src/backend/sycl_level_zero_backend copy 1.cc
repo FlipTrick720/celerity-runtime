@@ -129,8 +129,13 @@ void initialize_event_pools(const std::vector<sycl::device>& devices, ze_context
 	if (g_pools_initialized) return;
 	
 	// Get pool size from environment
+	// FIXED: Ensure environment variable is properly consumed
 	const char* env_size = std::getenv("CELERITY_L0_EVENT_POOL_SIZE");
 	size_t pool_size = env_size ? std::atoi(env_size) : 512;
+	
+	if (env_size) {
+		CELERITY_DEBUG("Level-Zero V1: Using CELERITY_L0_EVENT_POOL_SIZE={}", pool_size);
+	}
 	
 	g_event_pools.reserve(devices.size());
 	
