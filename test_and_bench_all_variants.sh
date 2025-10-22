@@ -10,6 +10,38 @@ echo "Level Zero Backend Variant Testing"
 echo "========================================="
 echo ""
 
+# =========================
+#  ENVIRONMENT CONFIGURATION
+# =========================
+
+# Base L0 tuning variables
+L0_POOL_SIZE=512
+L0_USE_BATCHING=1
+L0_SMALL_THRESHOLD=4096
+L0_MICRO_THRESHOLD=256
+L0_BATCH_THRESHOLD_OPS=8
+L0_BATCH_THRESHOLD_US=100
+
+# Function: unset all CELERITY_L0_* variables for clean testing
+unset_l0_env() {
+  unset CELERITY_L0_EVENT_POOL_SIZE
+  unset CELERITY_L0_USE_BATCHING
+  unset CELERITY_L0_SMALL_THRESHOLD
+  unset CELERITY_L0_MICRO_THRESHOLD
+  unset CELERITY_L0_BATCH_THRESHOLD_OPS
+  unset CELERITY_L0_BATCH_THRESHOLD_US
+}
+
+# Function: export all CELERITY_L0_* variables for benchmarking
+export_l0_env() {
+  export CELERITY_L0_EVENT_POOL_SIZE=${L0_POOL_SIZE}
+  export CELERITY_L0_USE_BATCHING=${L0_USE_BATCHING}
+  export CELERITY_L0_SMALL_THRESHOLD=${L0_SMALL_THRESHOLD}
+  export CELERITY_L0_MICRO_THRESHOLD=${L0_MICRO_THRESHOLD}
+  export CELERITY_L0_BATCH_THRESHOLD_OPS=${L0_BATCH_THRESHOLD_OPS}
+  export CELERITY_L0_BATCH_THRESHOLD_US=${L0_BATCH_THRESHOLD_US}
+}
+
 # Create results directory with timestamp
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="variant_test_results_${TIMESTAMP}"
@@ -46,41 +78,8 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     echo "Testing: $variant"
     echo "========================================="
     
-    # Clear previous variant's env vars
-    unset CELERITY_L0_EVENT_POOL_SIZE
-    unset CELERITY_L0_BATCH_THRESHOLD_OPS
-    unset CELERITY_L0_BATCH_THRESHOLD_US
-    unset CELERITY_L0_MICRO_THRESHOLD
-    unset CELERITY_L0_SMALL_THRESHOLD
-    unset CELERITY_L0_USE_BATCHING
-    
-    case "$variant" in
-        variant1)
-            export CELERITY_L0_EVENT_POOL_SIZE=512
-            ;;
-            
-        variant2)
-            export CELERITY_L0_EVENT_POOL_SIZE=512
-            ;;
-            
-        variant3)
-            export CELERITY_L0_BATCH_THRESHOLD_OPS=8
-            export CELERITY_L0_BATCH_THRESHOLD_US=100
-            ;;
-            
-        variant4)
-            export CELERITY_L0_EVENT_POOL_SIZE=512
-            export CELERITY_L0_MICRO_THRESHOLD=256
-            export CELERITY_L0_SMALL_THRESHOLD=4096
-            export CELERITY_L0_BATCH_THRESHOLD_OPS=8
-            export CELERITY_L0_BATCH_THRESHOLD_US=100
-            export CELERITY_L0_USE_BATCHING=1
-            ;;
-            
-        *)
-            echo "Unknown variant: $variant"
-            ;;
-    esac
+    # Environment variables are now handled by unset_l0_env() for tests
+    # and export_l0_env() for benchmarks - no need to set them here
     
     if [[ "$variant" != "baseline" ]]; then
         echo "Installing $variant files..."
@@ -128,8 +127,9 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
         echo "✓ Using existing benchmark build"
     fi
     
-    # Run tests (optional - don't fail if tests aren't built)
-    echo "Running tests..."
+    # Run tests with clean environment (no CELERITY_L0_* vars)
+    echo "Running tests with clean environment (no CELERITY_L0_* vars)..."
+    unset_l0_env
     if ./run_test.sh --profile test > "$VARIANT_DIR/tests.log" 2>&1; then
         echo "✓ Tests passed"
         if [ -f "$VARIANT_DIR/tests.log" ]; then
@@ -144,8 +144,10 @@ for variant in baseline variant1 variant2 variant3 variant4 variant5; do
     echo "Cool down (30s)..."
     sleep 30
     
-    # Run benchmarks - directly call run_matrix.sh to control output location
-    echo "Running benchmarks..."
+    # Run benchmarks with Level Zero tuning variables
+    echo "Running benchmarks with CELERITY_L0_* vars exported:"
+    export_l0_env
+    env | grep CELERITY_L0_
     
     # Set reproducibility environment
     export UR_ADAPTERS_FORCE_ORDER=LEVEL_ZERO
@@ -190,3 +192,7 @@ done
 
 echo ""
 echo "Benchmark results: bench/results/"
+
+# Final cleanup - unset L0 environment variables
+unset_l0_env
+echo "✓ Environment cleaned up"
