@@ -520,40 +520,35 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 			    return;
 		    }
 		    
-		    // Micro-copy fast path (host-side memcpy for tiny transfers)
+		    // Micro-copy fast path (host-side memcpy for tiny transfers) - disabled by default
 		    if (try_micro_copy(source, dest, size_bytes, device)) {
 			    last_event = queue.ext_oneapi_submit_barrier();
 			    return;
 		    }
 		    
-		    // Small copy: immediate list
-		    if (size_bytes <= g_small_threshold) {
-			    size_t event_idx = g_event_pools[device]->acquire();
-			    ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
-			    
-			    std::lock_guard<std::mutex> lock(g_immediate_lists[device]->mutex);
-			    ze_command_list_handle_t cmd_list = g_immediate_lists[device]->get();
-			    
-			    ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
-			    // Wait for completion and release event
-			    ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
-			    g_event_pools[device]->release(event_idx);
-			    
-			    CELERITY_TRACE("Level-Zero V4: immediate linear copy {} bytes", size_bytes);
-		    } else if (g_use_batching) {
-			    // Large copy: batching
-			    std::lock_guard<std::mutex> lock(g_batch_managers[device]->mutex);
-			    ze_command_list_handle_t batch_list = g_batch_managers[device]->get_batch_list();
-			    ze_check(zeCommandListAppendMemoryCopy(batch_list, dest, source, size_bytes, nullptr, 0, nullptr), "zeCommandListAppendMemoryCopy");
-			    
-			    g_batch_managers[device]->add_operation();
-			    
-			    if (g_batch_managers[device]->should_flush()) {
-				    g_batch_managers[device]->flush_batch();
-			    }
-			    
-			    CELERITY_TRACE("Level-Zero V4: batch linear copy {} bytes", size_bytes);
-		    }
+		    // Use regular command list on native ZE queue (safe, maintains SYCL queue ordering)
+		    CELERITY_TRACE("Level-Zero V4: linear copy {} bytes", size_bytes);
+		    
+		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
+		    auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+		    auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
+		    auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+		    
+		    size_t event_idx = g_event_pools[device]->acquire();
+		    ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
+		    
+		    ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
+		    ze_command_list_handle_t cmd_list = nullptr;
+		    ze_check(zeCommandListCreate(ze_context, ze_device, &cmd_list_desc, &cmd_list), "zeCommandListCreate");
+		    
+		    ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		    
+		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
+		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+		    
+		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
+		    g_event_pools[device]->release(event_idx);
 		    
 		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
