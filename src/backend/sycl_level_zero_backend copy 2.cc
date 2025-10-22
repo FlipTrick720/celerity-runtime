@@ -274,6 +274,7 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    nd_copy_box_level_zero(queue, device, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
 	    [&queue, device, &last_event](const void* const source, void* const dest, size_t size_bytes) {
+		    // CRITICAL: Zero-work short-circuit - must check size_bytes == 0 before any Level-Zero operations
 		    if (size_bytes == 0) {
 			    CELERITY_TRACE("Level-Zero V2: short-circuit empty linear copy (no ZE submit)");
 			    last_event = queue.ext_oneapi_submit_barrier();

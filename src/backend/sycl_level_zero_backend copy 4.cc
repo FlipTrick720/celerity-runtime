@@ -333,32 +333,16 @@ void cleanup_all() {
 	g_pools_initialized = false;
 }
 
-// Micro-copy fast path (NEW in V4) - FIXED for safety
+// Micro-copy fast path (NEW in V4) - DISABLED for safety
 bool try_micro_copy(const void* source, void* dest, size_t size_bytes, device_id device) {
-	// Guard against invalid inputs - FIXED: proper validation
-	if (size_bytes == 0 || !source || !dest) {
-		CELERITY_TRACE("Level-Zero V4: micro-copy rejected - invalid inputs (size={}, src={}, dst={})", 
-		               size_bytes, static_cast<const void*>(source), static_cast<const void*>(dest));
-		return false;
-	}
-	if (size_bytes > g_micro_threshold) return false;
-	
-	// FIXED: Disable micro-copy to prevent SIGSEGV on device memory
+	// DISABLED: Micro-copy optimization is unsafe for device memory
 	// Device memory is not directly accessible from host, so memcpy will segfault
 	// This optimization is only safe for host-to-host copies, which we can't detect reliably
 	// For now, disable this optimization entirely to prevent crashes
-	return false;
-	
-	// Original micro-copy code (disabled for safety):
-	// if (size_bytes <= 64) {
-	//     std::memcpy(dest, source, size_bytes);
-	//     if (g_use_batching) {
-	//         g_batch_managers[device]->record_micro_bypass();
-	//     }
-	//     CELERITY_TRACE("Level-Zero V4: micro-copy bypass {} bytes", size_bytes);
-	//     return true;
-	// }
-	
+	(void)source;
+	(void)dest;
+	(void)size_bytes;
+	(void)device;
 	return false;
 }
 
@@ -507,10 +491,9 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, cons
 		    nd_copy_box_level_zero(queue, device, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
 	    [&queue, device, &last_event](const void* const source, void* const dest, size_t size_bytes) {
-		    // FIXED: Zero-work short-circuit with proper pointer validation
-		    if (size_bytes == 0 || !source || !dest) {
-			    CELERITY_TRACE("Level-Zero V4: short-circuit empty/invalid linear copy (no ZE submit) - size={}, src={}, dst={}", 
-			                   size_bytes, static_cast<const void*>(source), static_cast<const void*>(dest));
+		    // CRITICAL: Zero-work short-circuit - must check size_bytes == 0 before any Level-Zero operations
+		    if (size_bytes == 0) {
+			    CELERITY_TRACE("Level-Zero V4: short-circuit empty linear copy (no ZE submit)");
 			    last_event = queue.ext_oneapi_submit_barrier();
 			    return;
 		    }
