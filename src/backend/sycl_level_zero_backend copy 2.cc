@@ -25,7 +25,6 @@
 #include <sycl/sycl.hpp>
 #include <sycl/backend.hpp>
 #include <sycl/ext/oneapi/backend/level_zero.hpp>
-#include <libenvpp/env.hpp>
 
 namespace celerity::detail::level_zero_backend_detail {
 
@@ -144,14 +143,6 @@ static bool g_pools_initialized = false;
 void initialize_pools(const std::vector<sycl::device>& devices, ze_context_handle_t context) {
 	std::lock_guard<std::mutex> lock(g_pools_mutex);
 	if (g_pools_initialized) return;
-	
-	// FIXED: Register environment variable with libenvpp to prevent "unused" warnings
-	static bool env_registered = false;
-	if (!env_registered) {
-		auto pref = env::prefix("CELERITY");
-		pref.register_variable<size_t>("L0_EVENT_POOL_SIZE");
-		env_registered = true;
-	}
 	
 	// Get pool size from environment
 	const char* env_size = std::getenv("CELERITY_L0_EVENT_POOL_SIZE");

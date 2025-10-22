@@ -25,7 +25,6 @@
 #include <sycl/sycl.hpp>
 #include <sycl/backend.hpp>
 #include <sycl/ext/oneapi/backend/level_zero.hpp>
-#include <libenvpp/env.hpp>
 
 namespace celerity::detail::level_zero_backend_detail {
 
@@ -72,16 +71,7 @@ struct batch_manager {
 		
 		ze_check(zeFenceCreate(queue, &fence_desc, &fence), "zeFenceCreate");
 		
-		// FIXED: Register environment variables with libenvpp to prevent "unused" warnings
-		static bool env_registered = false;
-		if (!env_registered) {
-			auto pref = env::prefix("CELERITY");
-			pref.register_variable<int>("L0_BATCH_THRESHOLD_OPS");
-			pref.register_variable<int>("L0_BATCH_THRESHOLD_US");
-			env_registered = true;
-		}
-		
-		// Get thresholds from environment - FIXED: Ensure variables are properly consumed
+		// Get thresholds from environment
 		const char* env_ops = std::getenv("CELERITY_L0_BATCH_THRESHOLD_OPS");
 		const char* env_us = std::getenv("CELERITY_L0_BATCH_THRESHOLD_US");
 		
