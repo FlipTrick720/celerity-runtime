@@ -10,10 +10,10 @@ set -euo pipefail
 # For test_all_variants.sh results, use variant names:
 VERSIONS=(
     "v0_baseline"
-    "v1_Event_Pooling"
-    "v2_Persistent_Event_Pool"
-    "v3_Pool_y_Event_Reuse"
-    "v4_Command_Lists_y_Persistent_Pool"
+    "v1_event_pooling"
+    "v2_immediate_pool"
+    "v3_batch_fence"
+    "v4_micro_optimized"
     "v5_No_Sync"
 )
 
@@ -111,25 +111,3 @@ fi
 echo "========================================="
 echo "Analysis Complete!"
 echo "========================================="
-echo ""
-echo "Individual version plots:"
-for version in "${VERSIONS[@]}"; do
-    if [[ -d "plots_${version}" ]]; then
-        echo "  - ${version}: bench/plots_${version}/"
-    fi
-done
-
-if [[ -d "comparison_all" ]]; then
-    echo ""
-    echo "Version comparison:"
-    echo "  - All versions: bench/comparison_all/"
-fi
-
-echo ""
-echo "Key files to check:"
-echo "  - plots_*/mode_comparison_level_zero.png"
-echo "  - plots_*/peak_bandwidth_summary.png"
-echo "  - plots_*/summary_statistics.csv"
-echo "  - comparison_all/version_comparison_*.png"
-echo "  - comparison_all/version_comparison.csv"
-echo ""
