@@ -1,0 +1,16 @@
+# Benchmark Summary Statistics
+
+| Backend | Operation | Mode | Pinned | Peak (GiB/s) | Median (GiB/s) | Min Latency (μs) |
+| --- | --- | --- | --- | --- | --- | --- |
+| LEVEL_ZERO | D2D | Sync | Yes | 180.35 | 4.19 | 49.81 |
+| LEVEL_ZERO | D2D | Sync | No | 188.67 | 7.24 | 32.80 |
+| LEVEL_ZERO | D2D | Batch | Yes | 208.31 | 41.16 | 5.22 |
+| LEVEL_ZERO | D2D | Batch | No | 208.30 | 41.50 | 5.18 |
+| LEVEL_ZERO | H2D | Sync | Yes | 10.22 | 4.13 | 34.68 |
+| LEVEL_ZERO | H2D | Sync | No | 7.28 | 1.89 | 92.03 |
+| LEVEL_ZERO | H2D | Batch | Yes | 10.27 | 8.22 | 4.26 |
+| LEVEL_ZERO | H2D | Batch | No | 10.24 | 8.02 | 4.57 |
+| LEVEL_ZERO | D2H | Sync | Yes | 10.53 | 4.29 | 33.92 |
+| LEVEL_ZERO | D2H | Sync | No | 7.44 | 1.94 | 90.02 |
+| LEVEL_ZERO | D2H | Batch | Yes | 10.59 | 9.14 | 3.44 |
+| LEVEL_ZERO | D2H | Batch | No | 10.55 | 8.86 | 3.74 |

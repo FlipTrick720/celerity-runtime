@@ -1,0 +1,20 @@
+=== Backend Version Info ===
+
+Timestamp: 2025-10-23 14:40:06
+Date Tag: 20251023_144005
+Backend Tag: v0_baseline
+Backend Notes: Initial implementation (shortest Version (289))
+Git SHA: 5e30339-dirty
+Git Branch: investigate/pooling-efficiency
+Hostname: gpuc5
+User: malte.braig
+SYCL Implementation: auto-detected
+Device: [level_zero:gpu][level_zero:0] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) A770 Graphics 12.55.8 [1.3.29138]
+Driver Version: 
+PCIe: 9a:00.0 VGA compatible controller: Intel Corporation DG2 [Arc A770] (rev 08)
+CPU: Intel(R) Xeon(R) Gold 5317 CPU @ 3.00GHz
+CPU Cores: 16
+NUMA: available: 2 nodes (0-1)
+CPU Affinity: not set
+UR_ADAPTERS_FORCE_ORDER: LEVEL_ZERO
+UR_DISABLE_ADAPTERS: OPENCL
