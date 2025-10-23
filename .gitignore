@@ -5,9 +5,7 @@ build_*
 build-*
 !build_and_test_celerity.sh
 !build_and_run_bench.sh
-comparison_all/
 BENCH_WORKFLOW.md
-plots_v*
 results/
 install
 .cache/
