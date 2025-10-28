@@ -56,7 +56,7 @@ cp include/backend/sycl_backend.h "$RESULTS_DIR/backend_h_original.h"
 
 # Define variants
 declare -A VARIANTS
-VARIANTS[baseline]="src/backend/sycl_level_zero_backend.cc"
+VARIANTS[baseline]="src/backend/sycl_level_zero_backend copy b.cc"
 VARIANTS[variant1]="src/backend/sycl_level_zero_backend copy 1.cc"
 VARIANTS[variant2]="src/backend/sycl_level_zero_backend copy 2.cc"
 VARIANTS[variant3]="src/backend/sycl_level_zero_backend copy 3.cc"
@@ -65,7 +65,7 @@ VARIANTS[variant5]="src/backend/sycl_level_zero_backend copy 5.cc"
 VARIANTS[variant6]="src/backend/sycl_level_zero_backend copy 6.cc"
 
 declare -A VARIANT_HEADERS
-VARIANT_HEADERS[baseline]="include/backend/sycl_backend.h"
+VARIANT_HEADERS[baseline]="include/backend/sycl_backend copy b.h"
 VARIANT_HEADERS[variant1]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant2]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant3]="include/backend/sycl_backend copy 1.h"
@@ -74,19 +74,15 @@ VARIANT_HEADERS[variant5]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant6]="include/backend/sycl_backend copy 1.h"
 
 # Test each variant
-for variant in baseline variant6 variant4 variant1 variant2 variant3 variant5; do
+for variant in variant6 variant4 baseline variant1 variant2 variant3 variant5; do
     echo ""
     echo "========================================="
     echo "Testing: $variant"
     echo "========================================="
     
-    if [[ "$variant" != "baseline" ]]; then
-        echo "Installing $variant files..."
-        cp "${VARIANTS[$variant]}" src/backend/sycl_level_zero_backend.cc
-        cp "${VARIANT_HEADERS[$variant]}" include/backend/sycl_backend.h
-    else
-        echo "Using baseline (no file changes needed)..."
-    fi
+    echo "Installing $variant files..."
+    cp "${VARIANTS[$variant]}" src/backend/sycl_level_zero_backend.cc
+    cp "${VARIANT_HEADERS[$variant]}" include/backend/sycl_backend.h
 
     # Backend version/tag - read from source file
     BACKEND_SOURCE="src/backend/sycl_level_zero_backend.cc"
