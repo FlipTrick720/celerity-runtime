@@ -62,6 +62,7 @@ VARIANTS[variant2]="src/backend/sycl_level_zero_backend copy 2.cc"
 VARIANTS[variant3]="src/backend/sycl_level_zero_backend copy 3.cc"
 VARIANTS[variant4]="src/backend/sycl_level_zero_backend copy 4.cc"
 VARIANTS[variant5]="src/backend/sycl_level_zero_backend copy 5.cc"
+VARIANTS[variant6]="src/backend/sycl_level_zero_backend copy 6.cc"
 
 declare -A VARIANT_HEADERS
 VARIANT_HEADERS[baseline]="include/backend/sycl_backend.h"
@@ -70,16 +71,14 @@ VARIANT_HEADERS[variant2]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant3]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant4]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant5]="include/backend/sycl_backend copy 1.h"
+VARIANT_HEADERS[variant6]="include/backend/sycl_backend copy 1.h"
 
 # Test each variant
-for variant in baseline variant1 variant2 variant3 variant4 variant5; do
+for variant in baseline variant6 variant4 variant1 variant2 variant3 variant5; do
     echo ""
     echo "========================================="
     echo "Testing: $variant"
     echo "========================================="
-    
-    # Environment variables are now handled by unset_l0_env() for tests
-    # and export_l0_env() for benchmarks - no need to set them here
     
     if [[ "$variant" != "baseline" ]]; then
         echo "Installing $variant files..."
@@ -179,19 +178,6 @@ echo "========================================="
 echo "All Variants Complete!"
 echo "========================================="
 echo ""
-echo "Test logs: $RESULTS_DIR/"
-for variant in baseline variant1 variant2 variant3 variant4 variant5; do
-    if [ -d "$RESULTS_DIR/$variant" ]; then
-        echo "  $variant/"
-        echo "    ├── build.log"
-        echo "    ├── tests.log"
-        echo "    ├── bench_build.log (if first variant)"
-        echo "    └── bench.log"
-    fi
-done
-
-echo ""
-echo "Benchmark results: bench/results/"
 
 # Final cleanup - unset L0 environment variables
 unset_l0_env

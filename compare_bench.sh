@@ -15,6 +15,7 @@ VERSIONS=(
     "v3_batch_fence"
     "v4_micro_optimized"
     "v5_No_Sync"
+    "v6_unified_safe_fast"
 )
 
 
