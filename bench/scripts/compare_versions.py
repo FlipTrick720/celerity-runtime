@@ -82,14 +82,14 @@ def plot_version_comparison(versions_data, output_dir):
     memcpy_df['size_kib'] = memcpy_df['bytes'] / 1024
     
     operations = ['D2D', 'H2D', 'D2H']
-    modes = [('sync', 'yes'), ('batch', 'yes')]  # Focus on pinned for clarity
+    modes = [('sync', 'yes'), ('batch', 'yes'), ('sync', 'no'), ('batch', 'no')]  # All four combinations
     
     for op in operations:
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
         fig.suptitle(f'{op} Bandwidth: Version Comparison', fontsize=16, fontweight='bold')
         
         for idx, (mode, pinned) in enumerate(modes):
-            ax = axes[idx]
+            ax = axes[idx // 2, idx % 2]
             
             for _, version_tag in versions_data:
                 data = memcpy_df[
@@ -108,7 +108,8 @@ def plot_version_comparison(versions_data, output_dir):
             ax.set_xscale('log', base=2)
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Bandwidth (GiB/s)')
-            ax.set_title(f'{mode.capitalize()} + Pinned')
+            pinned_label = 'Pinned' if pinned == 'yes' else 'Pageable'
+            ax.set_title(f'{mode.capitalize()} + {pinned_label}')
             ax.grid(True, alpha=0.3)
             ax.legend()
         
@@ -117,6 +118,59 @@ def plot_version_comparison(versions_data, output_dir):
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"Saved: {output_file}")
         plt.close()
+
+def plot_mode_comparison(versions_data, output_dir):
+    """Plot all modes on single plot per operation (like analyze_results.py)."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    # Combine all data
+    all_data = pd.concat([df for df, _ in versions_data], ignore_index=True)
+    memcpy_df = all_data[all_data['bench'] == 'memcpy_linear'].copy()
+    memcpy_df['size_kib'] = memcpy_df['bytes'] / 1024
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle('Version Comparison: All Modes', fontsize=16, fontweight='bold')
+    
+    operations = ['D2D', 'H2D', 'D2H']
+    
+    for idx, op in enumerate(operations):
+        ax = axes[idx]
+        op_data = memcpy_df[memcpy_df['op'] == op]
+        
+        # Plot all 4 mode combinations for each version
+        for _, version_tag in versions_data:
+            version_data = op_data[op_data['backend_version'] == version_tag]
+            
+            for mode in ['sync', 'batch']:
+                for pinned in ['yes', 'no']:
+                    data = version_data[
+                        (version_data['mode'] == mode) &
+                        (version_data['pinned'] == pinned)
+                    ]
+                    
+                    if not data.empty:
+                        grouped = data.groupby('size_kib')['gib_per_s'].median().reset_index()
+                        label = f"{version_tag}: {mode.capitalize()} + {'Pin' if pinned == 'yes' else 'Page'}"
+                        linestyle = '-' if mode == 'batch' else '--'
+                        linewidth = 2.5 if pinned == 'yes' else 1.5
+                        
+                        ax.plot(grouped['size_kib'], grouped['gib_per_s'],
+                               marker='o', linestyle=linestyle, linewidth=linewidth,
+                               markersize=4, label=label, alpha=0.8)
+        
+        ax.set_xscale('log', base=2)
+        ax.set_xlabel('Transfer Size (KiB)')
+        ax.set_ylabel('Bandwidth (GiB/s)')
+        ax.set_title(f'{op} Performance')
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, loc='best')
+    
+    plt.tight_layout()
+    output_file = output_dir / 'version_comparison_all_modes.png'
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"Saved: {output_file}")
+    plt.close()
 
 def generate_comparison_table(versions_data, output_dir):
     """Generate comparison table of peak bandwidths."""
@@ -213,6 +267,7 @@ def main():
     # Generate comparison plots
     print("\n=== Generating Comparison Plots ===")
     plot_version_comparison(versions_data, output_dir)
+    plot_mode_comparison(versions_data, output_dir)
     
     # Generate comparison table
     print("\n=== Generating Comparison Table ===")
