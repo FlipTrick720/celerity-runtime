@@ -186,7 +186,7 @@ struct device_state {
 		qd.ordinal = compute_ordinal;
 		qd.index = 0;
 		qd.flags = 0;
-		qd.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+		qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;  // Use async mode
 		qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
 		ze_check(zeCommandListCreateImmediate(ctx, dev, &qd, &imm), "zeCommandListCreateImmediate");
 		batch.init(ctx, dev);
@@ -238,10 +238,11 @@ class l0_copy_engine {
 
 		if(bytes <= g_small_threshold) {
 			// immediate list path (lowest latency)
-			// Synchronous immediate list blocks until complete
+			// Use async immediate list but synchronize explicitly
 			ze_check(zeCommandListAppendMemoryCopy(st.imm, dst, src, bytes, nullptr, 0, nullptr),
 			         "zeCommandListAppendMemoryCopy[imm]");
-			// Already complete due to synchronous mode, return barrier
+			// Synchronize the immediate command list to ensure completion
+			ze_check(zeCommandListHostSynchronize(st.imm, UINT64_MAX), "zeCommandListHostSynchronize");
 			return sq.ext_oneapi_submit_barrier();
 		}
 
