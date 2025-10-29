@@ -98,17 +98,15 @@ struct event_pool {
 struct batch_manager {
 	ze_command_list_handle_t cl = nullptr;   // regular list for batching
 	ze_fence_handle_t fence     = nullptr;   // queue fence to wait for batched work
-	ze_command_queue_handle_t q = nullptr;   // native queue
 	std::mutex mtx;
 	size_t pending_ops = 0;
 	std::chrono::steady_clock::time_point start;
 
-	void init(ze_context_handle_t ctx, ze_device_handle_t dev, ze_command_queue_handle_t queue) {
-		q = queue;
+	void init(ze_context_handle_t ctx, ze_device_handle_t dev) {
 		ze_command_list_desc_t lcd{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
 		ze_check(zeCommandListCreate(ctx, dev, &lcd, &cl), "zeCommandListCreate");
-		ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
-		ze_check(zeFenceCreate(q, &fd, &fence), "zeFenceCreate");
+		// Fence will be created on first use with actual queue
+		fence = nullptr;
 	}
 
 	void append_memcpy(const void* src, void* dst, size_t bytes) {
@@ -129,8 +127,15 @@ struct batch_manager {
 		return false;
 	}
 
-	void flush_and_wait() {
+	void flush_and_wait(ze_command_queue_handle_t q) {
 		if(pending_ops==0) return;
+		
+		// Create fence on first use if needed
+		if(!fence) {
+			ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
+			ze_check(zeFenceCreate(q, &fd, &fence), "zeFenceCreate");
+		}
+		
 		ze_check(zeCommandListClose(cl), "zeCommandListClose");
 		ze_check(zeFenceReset(fence), "zeFenceReset");
 		ze_check(zeCommandQueueExecuteCommandLists(q, 1, &cl, /*fence*/fence), "zeCommandQueueExecuteCommandLists");
@@ -141,9 +146,9 @@ struct batch_manager {
 
 	void destroy() {
 		if(!cl) return;
-		zeFenceDestroy(fence);
+		if(fence) zeFenceDestroy(fence);
 		zeCommandListDestroy(cl);
-		cl=nullptr; fence=nullptr; q=nullptr;
+		cl=nullptr; fence=nullptr;
 	}
 };
 
@@ -155,21 +160,41 @@ struct device_state {
 	// batch manager for large copies
 	batch_manager batch;
 
-	void init_small(ze_context_handle_t ctx, ze_device_handle_t dev, ze_command_queue_handle_t q) {
-		ze_command_queue_desc_t qd{ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC};
-		qd.ordinal = 0;
+	void init_small(ze_context_handle_t ctx, ze_device_handle_t dev) {
+		// Query device properties to get compute queue ordinal
+		uint32_t queue_group_count = 0;
+		ze_check(zeDeviceGetCommandQueueGroupProperties(dev, &queue_group_count, nullptr), "zeDeviceGetCommandQueueGroupProperties");
+		std::vector<ze_command_queue_group_properties_t> queue_props(queue_group_count);
+		for(auto& prop : queue_props) {
+			prop.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+			prop.pNext = nullptr;
+		}
+		ze_check(zeDeviceGetCommandQueueGroupProperties(dev, &queue_group_count, queue_props.data()), "zeDeviceGetCommandQueueGroupProperties");
+		
+		// Find compute queue ordinal
+		uint32_t compute_ordinal = 0;
+		for(uint32_t i = 0; i < queue_group_count; ++i) {
+			if(queue_props[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE) {
+				compute_ordinal = i;
+				break;
+			}
+		}
+		
+		ze_command_queue_desc_t qd{};
+		qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+		qd.pNext = nullptr;
+		qd.ordinal = compute_ordinal;
 		qd.index = 0;
+		qd.flags = 0;
 		qd.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+		qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
 		ze_check(zeCommandListCreateImmediate(ctx, dev, &qd, &imm), "zeCommandListCreateImmediate");
-		batch.init(ctx, dev, q);
+		batch.init(ctx, dev);
 	}
 
 	void destroy() {
-		// Flush any pending batch operations before destroying
-		if(batch.cl) {
-			std::lock_guard lk(batch.mtx);
-			batch.flush_and_wait();
-		}
+		// Note: Cannot flush batch here as we don't have queue handle
+		// Batch should be flushed before destroy is called
 		batch.destroy();
 		if(imm) zeCommandListDestroy(imm);
 		pool.destroy();
@@ -221,14 +246,13 @@ class l0_copy_engine {
 		}
 
 		if(g_use_batching) {
-			std::lock_guard lk(st.batch.mtx);
-			st.batch.append_memcpy(src, dst, bytes);
-			if(st.batch.should_flush()) {
-				st.batch.flush_and_wait();
+			{
+				std::lock_guard lk(st.batch.mtx);
+				st.batch.append_memcpy(src, dst, bytes);
+				// For correctness: always flush to ensure completion before returning
+				// This ensures the copy is done before the barrier event is used
+				st.batch.flush_and_wait(zeq);
 			}
-			// For correctness: always flush to ensure completion before returning
-			// This ensures the copy is done before the barrier event is used
-			st.batch.flush_and_wait();
 			return sq.ext_oneapi_submit_barrier();
 		}
 
@@ -302,12 +326,9 @@ static void initialize_all(const std::vector<sycl::device>& devices, ze_context_
 	g_states.reserve(devices.size());
 	for(size_t i=0;i<devices.size();++i){
 		auto zedev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
-		auto zeq   = std::get<ze_command_queue_handle_t>(
-		                 sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
-		                     sycl::queue{devices[i]}));
 		auto st = std::make_unique<device_state>();
 		st->pool.init(zectx, zedev, g_pool_size);
-		st->init_small(zectx, zedev, zeq);
+		st->init_small(zectx, zedev);
 		g_states.push_back(std::move(st));
 	}
 }
