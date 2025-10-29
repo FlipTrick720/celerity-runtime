@@ -132,6 +132,7 @@ struct batch_manager {
 	void flush_and_wait() {
 		if(pending_ops==0) return;
 		ze_check(zeCommandListClose(cl), "zeCommandListClose");
+		ze_check(zeFenceReset(fence), "zeFenceReset");
 		ze_check(zeCommandQueueExecuteCommandLists(q, 1, &cl, /*fence*/fence), "zeCommandQueueExecuteCommandLists");
 		ze_check(zeFenceHostSynchronize(fence, UINT64_MAX), "zeFenceHostSynchronize");
 		ze_check(zeCommandListReset(cl), "zeCommandListReset");
@@ -155,14 +156,22 @@ struct device_state {
 	batch_manager batch;
 
 	void init_small(ze_context_handle_t ctx, ze_device_handle_t dev, ze_command_queue_handle_t q) {
-		ze_command_list_desc_t d{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
-		ze_check(zeCommandListCreateImmediate(ctx, dev, &d, &imm), "zeCommandListCreateImmediate");
+		ze_command_queue_desc_t qd{ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC};
+		qd.ordinal = 0;
+		qd.index = 0;
+		qd.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+		ze_check(zeCommandListCreateImmediate(ctx, dev, &qd, &imm), "zeCommandListCreateImmediate");
 		batch.init(ctx, dev, q);
 	}
 
 	void destroy() {
+		// Flush any pending batch operations before destroying
+		if(batch.cl) {
+			std::lock_guard lk(batch.mtx);
+			batch.flush_and_wait();
+		}
 		batch.destroy();
-		if(imm) zeCommandListDestroyImmediate(imm);
+		if(imm) zeCommandListDestroy(imm);
 		pool.destroy();
 	}
 };
@@ -184,7 +193,7 @@ static inline void memcpy_micro(void* dst, const void* src, size_t n) {
 // ---------- Main copy primitive (contiguous only here; ND dispatched by layout) ----------
 class l0_copy_engine {
   public:
-	l0_copy_engine(std::vector<device_state>* per_dev) : m_per_dev(per_dev) {}
+	l0_copy_engine(std::vector<std::unique_ptr<device_state>>* per_dev) : m_per_dev(per_dev) {}
 
 	// Must be called on the submission thread of the backend, queue already selected
 	sycl::event copy_contiguous(sycl::queue& sq, device_id dev_id,
@@ -200,21 +209,26 @@ class l0_copy_engine {
 		const auto [zeq, zectx] = get_native_q_and_ctx(sq);
 		auto zedev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sq.get_device());
 
-		auto& st = (*m_per_dev)[dev_id];
+		auto& st = *(*m_per_dev)[dev_id];
 
 		if(bytes <= g_small_threshold) {
 			// immediate list path (lowest latency)
+			// Synchronous immediate list blocks until complete
 			ze_check(zeCommandListAppendMemoryCopy(st.imm, dst, src, bytes, nullptr, 0, nullptr),
 			         "zeCommandListAppendMemoryCopy[imm]");
-			// convert completion to SYCL-visible barrier without stalling whole queue
+			// Already complete due to synchronous mode, return barrier
 			return sq.ext_oneapi_submit_barrier();
 		}
 
 		if(g_use_batching) {
 			std::lock_guard lk(st.batch.mtx);
 			st.batch.append_memcpy(src, dst, bytes);
-			if(st.batch.should_flush()) st.batch.flush_and_wait();
-			// produce a barrier so outer code can depend on it (even if op stayed in batch)
+			if(st.batch.should_flush()) {
+				st.batch.flush_and_wait();
+			}
+			// For correctness: always flush to ensure completion before returning
+			// This ensures the copy is done before the barrier event is used
+			st.batch.flush_and_wait();
 			return sq.ext_oneapi_submit_barrier();
 		}
 
@@ -236,7 +250,7 @@ class l0_copy_engine {
 	}
 
   private:
-	std::vector<device_state>* m_per_dev;
+	std::vector<std::unique_ptr<device_state>>* m_per_dev;
 };
 
 // ND dispatcher using existing layout helpers
@@ -254,8 +268,8 @@ static inline void dispatch_nd(const void* src_base, void* dst_base,
 		                                      box_copy.get_offset() - dst_box.get_offset(),
 		                                      box_copy.get_range(), elem_size);
 		    if(layout.contiguous_size == 0) return;
-		    submit(static_cast<const std::byte*>(src) + layout.src_offset_bytes,
-		           static_cast<std::byte*>(dst) + layout.dst_offset_bytes,
+		    submit(static_cast<const std::byte*>(src) + layout.offset_in_source,
+		           static_cast<std::byte*>(dst) + layout.offset_in_dest,
 		           layout.contiguous_size);
 	    },
 	    [&](const void* src, void* dst, size_t bytes) { submit(src, dst, bytes); });
@@ -281,22 +295,25 @@ static async_event nd_copy_device_level_zero(sycl::queue& sq, device_id dev_id,
 }
 
 // ---------- Global state ----------
-static std::vector<device_state> g_states;
+static std::vector<std::unique_ptr<device_state>> g_states;
 
 static void initialize_all(const std::vector<sycl::device>& devices, ze_context_handle_t zectx) {
-	g_states.resize(devices.size());
+	g_states.clear();
+	g_states.reserve(devices.size());
 	for(size_t i=0;i<devices.size();++i){
 		auto zedev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
 		auto zeq   = std::get<ze_command_queue_handle_t>(
 		                 sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
 		                     sycl::queue{devices[i]}));
-		g_states[i].pool.init(zectx, zedev, g_pool_size);
-		g_states[i].init_small(zectx, zedev, zeq);
+		auto st = std::make_unique<device_state>();
+		st->pool.init(zectx, zedev, g_pool_size);
+		st->init_small(zectx, zedev, zeq);
+		g_states.push_back(std::move(st));
 	}
 }
 
 static void cleanup_all() {
-	for(auto& s : g_states) s.destroy();
+	for(auto& s : g_states) s->destroy();
 	g_states.clear();
 }
 
