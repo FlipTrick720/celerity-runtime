@@ -10,12 +10,11 @@
 //   - Return a single SYCL barrier event that fences all native L0 work
 //   - L0-only implementation internally (SYCL used only to obtain native handles & publish a barrier event)
 //
-// Refactoring to fix build errors:
-//   * Removed incorrect fence passed to zeCommandListAppendMemoryCopy (API takes an EVENT, not a fence).
-//   * Removed use of non-existent box<3> helpers; rely solely on dispatch_nd_region_copy to emit contiguous segments.
-//   * Use sycl_backend_detail::sycl_event via make_async_event<...> factory.
-//   * Ensure zeCommandListCreate receives a valid device handle.
-//   * No host memcpy on device pointers (tiny copies still go through immediate L0 copy).
+// Refactoring in this revision (from build error):
+//   * Provide BOTH callbacks to dispatch_nd_region_copy: a box-copy lambda and a linear-copy lambda.
+//     The box path decomposes the region into contiguous slices using for_each_contiguous_chunk and
+//     forwards them to the contiguous L0 copy routine.
+//   * All other logic remains unchanged (event pools, thresholds, fences).
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -196,7 +195,7 @@ struct batch_manager {
 	}
 
 	void append_copy(const void* src, void* dst, size_t bytes) {
-		// NOTE: Do NOT pass the fence here; AppendMemoryCopy expects an EVENT, not a FENCE.
+		// NOTE: AppendMemoryCopy expects an EVENT, not a FENCE.
 		ze_check(zeCommandListAppendMemoryCopy(list, dst, src, bytes, /*event*/ nullptr, 0, nullptr),
 		         "zeCommandListAppendMemoryCopy (batch)");
 		if(pending_ops++ == 0) start = std::chrono::steady_clock::now();
@@ -213,7 +212,7 @@ struct batch_manager {
 	void flush_and_wait() {
 		if(pending_ops == 0) return;
 		ze_check(zeCommandListClose(list), "zeCommandListClose");
-		// Correctness: fence the queue at submission time, then host-wait on the fence.
+		// Fence the queue at submission time, then host-wait on the fence.
 		ze_check(zeCommandQueueExecuteCommandLists(queue, 1, &list, fence), "zeCommandQueueExecuteCommandLists");
 		ze_check(zeFenceHostSynchronize(fence, UINT64_MAX), "zeFenceHostSynchronize");
 		ze_check(zeFenceReset(fence), "zeFenceReset");
@@ -231,9 +230,9 @@ struct batch_manager {
 
 // ---------- global per-device state (initialized on first use) ----------
 
-static std::unique_ptr<event_pool_manager>       g_pool;
+static std::unique_ptr<event_pool_manager>        g_pool;
 static std::unique_ptr<immediate_cmdlist_manager> g_imm;
-static std::unique_ptr<batch_manager>            g_batch;
+static std::unique_ptr<batch_manager>             g_batch;
 static bool g_initialized = false;
 static std::mutex g_init_mtx;
 
@@ -346,11 +345,28 @@ static async_event nd_copy_device_level_zero(
     const region_layout& source_layout, const region_layout& dest_layout,
     const region<3>& copy_region, const size_t elem_size, bool enable_profiling) {
 
-	// dispatch_nd_region_copy calls 'submit' for each contiguous slice (src, dst, bytes).
+	// NOTE (fix for build error): dispatch_nd_region_copy requires **two** callbacks:
+	// a box-copy (for 2D/3D boxes) and a linear-copy (for pre-contiguous regions).
 	sycl::event last = queue.ext_oneapi_submit_barrier();
-	dispatch_nd_region_copy(source_base, dest_base, source_layout, dest_layout, copy_region, elem_size,
-	    [&](const void* src, void* dst, size_t bytes) {
-		    last = copy_contiguous_segment(queue, src, dst, bytes);
+
+	dispatch_nd_region_copy(
+	    source_base, dest_base, source_layout, dest_layout, copy_region, elem_size,
+	    // Box copy: decompose into contiguous slices and use the contiguous copier.
+	    [&](const void* const src_base, void* const dst_base,
+	        const box<3>& src_box, const box<3>& dst_box, const box<3>& cp_box) {
+		    const auto* src_ptr = static_cast<const char*>(src_base);
+		    auto* dst_ptr = static_cast<char*>(dst_base);
+		    for_each_contiguous_chunk(
+		        make_region_layout(src_box, elem_size),
+		        make_region_layout(dst_box, elem_size),
+		        cp_box,
+		        [&](size_t src_off, size_t dst_off, size_t size_bytes) {
+			        last = copy_contiguous_segment(queue, src_ptr + src_off, dst_ptr + dst_off, size_bytes);
+		        });
+	    },
+	    // Linear copy: already contiguous, forward directly.
+	    [&](const void* const src, void* const dst, size_t size_bytes) {
+		    last = copy_contiguous_segment(queue, src, dst, size_bytes);
 	    });
 
 	// Publish a celerity-visible event (profiling flag honored).
