@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -155,40 +156,10 @@ struct batch_manager {
 // ---------- Per-device state ----------
 struct device_state {
 	event_pool pool;
-	// immediate command list for small copies
-	ze_command_list_handle_t imm = nullptr;
 	// batch manager for large copies
 	batch_manager batch;
 
 	void init_small(ze_context_handle_t ctx, ze_device_handle_t dev) {
-		// Query device properties to get compute queue ordinal
-		uint32_t queue_group_count = 0;
-		ze_check(zeDeviceGetCommandQueueGroupProperties(dev, &queue_group_count, nullptr), "zeDeviceGetCommandQueueGroupProperties");
-		std::vector<ze_command_queue_group_properties_t> queue_props(queue_group_count);
-		for(auto& prop : queue_props) {
-			prop.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
-			prop.pNext = nullptr;
-		}
-		ze_check(zeDeviceGetCommandQueueGroupProperties(dev, &queue_group_count, queue_props.data()), "zeDeviceGetCommandQueueGroupProperties");
-		
-		// Find compute queue ordinal
-		uint32_t compute_ordinal = 0;
-		for(uint32_t i = 0; i < queue_group_count; ++i) {
-			if(queue_props[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE) {
-				compute_ordinal = i;
-				break;
-			}
-		}
-		
-		ze_command_queue_desc_t qd{};
-		qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
-		qd.pNext = nullptr;
-		qd.ordinal = compute_ordinal;
-		qd.index = 0;
-		qd.flags = 0;
-		qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;  // Use async mode
-		qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
-		ze_check(zeCommandListCreateImmediate(ctx, dev, &qd, &imm), "zeCommandListCreateImmediate");
 		batch.init(ctx, dev);
 	}
 
@@ -196,7 +167,6 @@ struct device_state {
 		// Note: Cannot flush batch here as we don't have queue handle
 		// Batch should be flushed before destroy is called
 		batch.destroy();
-		if(imm) zeCommandListDestroy(imm);
 		pool.destroy();
 	}
 };
@@ -210,11 +180,6 @@ get_native_q_and_ctx(sycl::queue& q) {
 	return {zeq, zectx};
 }
 
-// cpu memcpy fallback for micro copies
-static inline void memcpy_micro(void* dst, const void* src, size_t n) {
-	std::memcpy(dst, src, n);
-}
-
 // ---------- Main copy primitive (contiguous only here; ND dispatched by layout) ----------
 class l0_copy_engine {
   public:
@@ -226,23 +191,28 @@ class l0_copy_engine {
 		if(bytes==0) {
 			return sq.ext_oneapi_submit_barrier();
 		}
-		if(bytes <= g_micro_threshold) {
-			memcpy_micro(dst, src, bytes);
-			return sq.ext_oneapi_submit_barrier(); // tie into SYCL dep graph
-		}
 
 		const auto [zeq, zectx] = get_native_q_and_ctx(sq);
 		auto zedev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sq.get_device());
 
 		auto& st = *(*m_per_dev)[dev_id];
 
+		// Use single-shot command list for small copies (including micro)
+		// This avoids batching overhead for small copies
 		if(bytes <= g_small_threshold) {
-			// immediate list path (lowest latency)
-			// Use async immediate list but synchronize explicitly
-			ze_check(zeCommandListAppendMemoryCopy(st.imm, dst, src, bytes, nullptr, 0, nullptr),
-			         "zeCommandListAppendMemoryCopy[imm]");
-			// Synchronize the immediate command list to ensure completion
-			ze_check(zeCommandListHostSynchronize(st.imm, UINT64_MAX), "zeCommandListHostSynchronize");
+			ze_command_list_handle_t cl{};
+			ze_command_list_desc_t d{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
+			ze_check(zeCommandListCreate(zectx, zedev, &d, &cl), "zeCommandListCreate");
+			ze_check(zeCommandListAppendMemoryCopy(cl, dst, src, bytes, nullptr, 0, nullptr),
+			         "zeCommandListAppendMemoryCopy");
+			ze_check(zeCommandListClose(cl), "zeCommandListClose");
+			ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
+			ze_fence_handle_t f{};
+			ze_check(zeFenceCreate(zeq, &fd, &f), "zeFenceCreate");
+			ze_check(zeCommandQueueExecuteCommandLists(zeq, 1, &cl, f), "zeCommandQueueExecuteCommandLists");
+			ze_check(zeFenceHostSynchronize(f, UINT64_MAX), "zeFenceHostSynchronize");
+			zeFenceDestroy(f);
+			zeCommandListDestroy(cl);
 			return sq.ext_oneapi_submit_barrier();
 		}
 
@@ -293,9 +263,12 @@ static inline void dispatch_nd(const void* src_base, void* dst_base,
 		                                      box_copy.get_offset() - dst_box.get_offset(),
 		                                      box_copy.get_range(), elem_size);
 		    if(layout.contiguous_size == 0) return;
-		    submit(static_cast<const std::byte*>(src) + layout.offset_in_source,
-		           static_cast<std::byte*>(dst) + layout.offset_in_dest,
-		           layout.contiguous_size);
+		    // Handle all contiguous chunks in this layout
+		    for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t chunk_bytes) {
+			    submit(static_cast<const std::byte*>(src) + src_off,
+			           static_cast<std::byte*>(dst) + dst_off,
+			           chunk_bytes);
+		    });
 	    },
 	    [&](const void* src, void* dst, size_t bytes) { submit(src, dst, bytes); });
 }
