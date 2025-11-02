@@ -1,5 +1,5 @@
-//Version: v6_unified_safe_fast
-//Text: Event-pool + micro/thresholds + immediate for small + fence-batched large; L0-only; strict correctness.
+//Version: v6_corrected_exact_fixes
+//Text: v0 baseline + event pooling from v1 + exact fixes from analysis
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -14,16 +14,13 @@
 
 #include <cassert>
 #include <cstddef>
-#include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <memory>
-#include <mutex>
-#include <optional>
-#include <queue>
 #include <utility>
 #include <vector>
-#include <chrono>
+#include <queue>
+#include <mutex>
+#include <unordered_map>
 
 #include <level_zero/ze_api.h>
 #include <sycl/sycl.hpp>
@@ -32,284 +29,288 @@
 
 namespace celerity::detail::level_zero_backend_detail {
 
-static inline void ze_check(ze_result_t r, const char* where) {
-	if(r != ZE_RESULT_SUCCESS) utils::panic("Level-Zero error in {}: code={}", where, static_cast<int>(r));
+// Level Zero error checking helper
+static inline void ze_check(ze_result_t result, const char* where) {
+	if(result != ZE_RESULT_SUCCESS) {
+		utils::panic("Level-Zero error in {}:: code={}", where, static_cast<int>(result));
+	}
 }
 
-// ---------- Env knobs with sane defaults ----------
-static inline size_t env_or(const char* name, size_t def) {
-	if(const char* v = std::getenv(name)) { try { return static_cast<size_t>(std::stoull(v)); } catch(...) {} }
-	return def;
-}
-static inline bool env_or_bool(const char* name, bool def) {
-	if(const char* v = std::getenv(name)) { return std::string(v) == "1" || std::string(v) == "true"; }
-	return def;
-}
-
-static size_t g_pool_size             = env_or("CELERITY_L0_EVENT_POOL_SIZE", 512);
-static size_t g_micro_threshold       = env_or("CELERITY_L0_MICRO_THRESHOLD", 256);    // bytes
-static size_t g_small_threshold       = env_or("CELERITY_L0_SMALL_THRESHOLD", 4096);   // bytes
-static bool   g_use_batching          = env_or_bool("CELERITY_L0_USE_BATCHING", true);
-static size_t g_batch_threshold_ops   = env_or("CELERITY_L0_BATCH_THRESHOLD_OPS", 8);
-static size_t g_batch_threshold_us    = env_or("CELERITY_L0_BATCH_THRESHOLD_US", 100);
-
-// ---------- Event pool per device ----------
-struct event_pool {
+// ============================================================================
+// Event pool manager (from v1) - one per device
+// ============================================================================
+struct event_pool_manager {
 	ze_event_pool_handle_t pool = nullptr;
 	std::vector<ze_event_handle_t> events;
-	std::queue<size_t> free_idx;
-	std::mutex mtx;
-
-	void init(ze_context_handle_t ctx, ze_device_handle_t dev, size_t count) {
-		ze_event_pool_desc_t d{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC};
-		d.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
-		d.count = static_cast<uint32_t>(count);
-		ze_check(zeEventPoolCreate(ctx, &d, 1, &dev, &pool), "zeEventPoolCreate");
-
-		events.resize(count);
-		for(size_t i=0;i<count;++i){
-			ze_event_desc_t ed{ZE_STRUCTURE_TYPE_EVENT_DESC};
-			ed.index  = static_cast<uint32_t>(i);
-			ed.signal = ZE_EVENT_SCOPE_FLAG_HOST;
-			ed.wait   = ZE_EVENT_SCOPE_FLAG_HOST;
-			ze_check(zeEventCreate(pool, &ed, &events[i]), "zeEventCreate");
-			free_idx.push(i);
+	std::queue<size_t> free_indices;
+	std::mutex mutex;
+	size_t peak_usage = 0;
+	size_t total_acquires = 0;
+	
+	// Make non-copyable and non-movable (contains std::mutex)
+	event_pool_manager() = default;
+	event_pool_manager(const event_pool_manager&) = delete;
+	event_pool_manager& operator=(const event_pool_manager&) = delete;
+	event_pool_manager(event_pool_manager&&) = delete;
+	event_pool_manager& operator=(event_pool_manager&&) = delete;
+	
+	void initialize(ze_context_handle_t context, ze_device_handle_t device, size_t pool_size) {
+		// Create persistent pool
+		ze_event_pool_desc_t pool_desc = {};
+		pool_desc.stype = ZE_STRUCTURE_TYPE_EVENT_POOL_DESC;
+		pool_desc.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
+		pool_desc.count = pool_size;
+		
+		ze_check(zeEventPoolCreate(context, &pool_desc, 1, &device, &pool), "zeEventPoolCreate");
+		
+		// Pre-create all events
+		events.resize(pool_size);
+		for (size_t i = 0; i < pool_size; ++i) {
+			ze_event_desc_t event_desc = {};
+			event_desc.stype = ZE_STRUCTURE_TYPE_EVENT_DESC;
+			event_desc.index = i;
+			event_desc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+			event_desc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+			
+			ze_check(zeEventCreate(pool, &event_desc, &events[i]), "zeEventCreate");
+			free_indices.push(i);
 		}
+		
+		CELERITY_DEBUG("Level-Zero: Created event pool with {} events", pool_size);
 	}
-
+	
 	size_t acquire() {
-		std::lock_guard lk(mtx);
-		if(free_idx.empty()) utils::panic("L0 event pool exhausted (size={})", events.size());
-		const auto i = free_idx.front(); free_idx.pop(); return i;
-	}
-	void release(size_t i) {
-		std::lock_guard lk(mtx);
-		free_idx.push(i);
-	}
-
-	void destroy() {
-		if(!pool) return;
-		for(auto& e: events) if(e) zeEventDestroy(e);
-		zeEventPoolDestroy(pool);
-		pool=nullptr; events.clear();
-	}
-};
-
-// ---------- Batch manager per device ----------
-struct batch_manager {
-	ze_command_list_handle_t cl = nullptr;   // regular list for batching
-	ze_fence_handle_t fence     = nullptr;   // queue fence to wait for batched work
-	std::mutex mtx;
-	size_t pending_ops = 0;
-	std::chrono::steady_clock::time_point start;
-
-	void init(ze_context_handle_t ctx, ze_device_handle_t dev) {
-		ze_command_list_desc_t lcd{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
-		ze_check(zeCommandListCreate(ctx, dev, &lcd, &cl), "zeCommandListCreate");
-		// Fence will be created on first use with actual queue
-		fence = nullptr;
-	}
-
-	void append_memcpy(const void* src, void* dst, size_t bytes) {
-		if(!cl) return;
-		if(pending_ops==0) start = std::chrono::steady_clock::now();
-		ze_check(zeCommandListAppendMemoryCopy(cl, dst, src, bytes, /*signal*/nullptr, 0, nullptr),
-		         "zeCommandListAppendMemoryCopy");
-		++pending_ops;
-	}
-
-	bool should_flush() const {
-		if(pending_ops >= g_batch_threshold_ops) return true;
-		if(pending_ops>0 && g_batch_threshold_us>0) {
-			auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-			              std::chrono::steady_clock::now() - start).count();
-			if(static_cast<size_t>(us) >= g_batch_threshold_us) return true;
-		}
-		return false;
-	}
-
-	void flush_and_wait(ze_command_queue_handle_t q) {
-		if(pending_ops==0) return;
+		std::lock_guard<std::mutex> lock(mutex);
 		
-		// Create fence on first use if needed
-		if(!fence) {
-			ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
-			ze_check(zeFenceCreate(q, &fd, &fence), "zeFenceCreate");
+		if (free_indices.empty()) {
+			CELERITY_WARN("Level-Zero event pool exhausted! Consider increasing CELERITY_L0_EVENT_POOL_SIZE");
+			utils::panic("Event pool exhausted");
 		}
 		
-		ze_check(zeCommandListClose(cl), "zeCommandListClose");
-		ze_check(zeFenceReset(fence), "zeFenceReset");
-		ze_check(zeCommandQueueExecuteCommandLists(q, 1, &cl, /*fence*/fence), "zeCommandQueueExecuteCommandLists");
-		ze_check(zeFenceHostSynchronize(fence, UINT64_MAX), "zeFenceHostSynchronize");
-		ze_check(zeCommandListReset(cl), "zeCommandListReset");
-		pending_ops = 0;
+		size_t idx = free_indices.front();
+		free_indices.pop();
+		
+		total_acquires++;
+		size_t in_use = events.size() - free_indices.size();
+		peak_usage = std::max(peak_usage, in_use);
+		
+		// CRITICAL: Reset event before reuse to clear previous state
+		ze_check(zeEventHostReset(events[idx]), "zeEventHostReset");
+		
+		return idx;
 	}
-
-	void destroy() {
-		if(!cl) return;
-		if(fence) zeFenceDestroy(fence);
-		zeCommandListDestroy(cl);
-		cl=nullptr; fence=nullptr;
+	
+	void release(size_t idx) {
+		std::lock_guard<std::mutex> lock(mutex);
+		free_indices.push(idx);
+	}
+	
+	ze_event_handle_t get_event(size_t idx) {
+		return events[idx];
+	}
+	
+	void cleanup() {
+		CELERITY_DEBUG("Level-Zero event pool stats: peak usage {}/{}, total acquires {}", 
+		              peak_usage, events.size(), total_acquires);
+		
+		for (auto event : events) {
+			if (event) zeEventDestroy(event);
+		}
+		if (pool) zeEventPoolDestroy(pool);
 	}
 };
 
-// ---------- Per-device state ----------
-struct device_state {
-	event_pool pool;
-	// batch manager for large copies
-	batch_manager batch;
+// Global pools (one per device) - use unique_ptr because event_pool_manager contains std::mutex
+static std::vector<std::unique_ptr<event_pool_manager>> g_event_pools;
+static std::mutex g_pools_mutex;
+static bool g_pools_initialized = false;
 
-	void init_small(ze_context_handle_t ctx, ze_device_handle_t dev) {
-		batch.init(ctx, dev);
+// Initialize pools at backend startup
+void initialize_event_pools(const std::vector<sycl::device>& devices, ze_context_handle_t context) {
+	std::lock_guard<std::mutex> lock(g_pools_mutex);
+	
+	if (g_pools_initialized) return;
+	
+	// Get pool size from environment
+	const char* env_size = std::getenv("CELERITY_L0_EVENT_POOL_SIZE");
+	size_t pool_size = env_size ? std::atoi(env_size) : 512;
+	
+	if (env_size) {
+		CELERITY_DEBUG("Level-Zero: Using CELERITY_L0_EVENT_POOL_SIZE={}", pool_size);
 	}
-
-	void destroy() {
-		// Note: Cannot flush batch here as we don't have queue handle
-		// Batch should be flushed before destroy is called
-		batch.destroy();
-		pool.destroy();
+	
+	g_event_pools.reserve(devices.size());
+	
+	for (size_t i = 0; i < devices.size(); ++i) {
+		auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
+		g_event_pools.emplace_back(std::make_unique<event_pool_manager>());
+		g_event_pools[i]->initialize(context, ze_device, pool_size);
 	}
-};
-
-// ---------- Helpers ----------
-static inline std::pair<ze_command_queue_handle_t, ze_context_handle_t>
-get_native_q_and_ctx(sycl::queue& q) {
-	auto nq = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q);
-	auto zeq = std::get<ze_command_queue_handle_t>(nq);
-	auto zectx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_context());
-	return {zeq, zectx};
+	
+	g_pools_initialized = true;
 }
 
-// ---------- Main copy primitive (contiguous only here; ND dispatched by layout) ----------
-class l0_copy_engine {
-  public:
-	l0_copy_engine(std::vector<std::unique_ptr<device_state>>* per_dev) : m_per_dev(per_dev) {}
-
-	// Must be called on the submission thread of the backend, queue already selected
-	sycl::event copy_contiguous(sycl::queue& sq, device_id dev_id,
-	                            const void* src, void* dst, size_t bytes, bool profiling) {
-		if(bytes==0) {
-			return sq.ext_oneapi_submit_barrier();
-		}
-
-		const auto [zeq, zectx] = get_native_q_and_ctx(sq);
-		auto zedev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sq.get_device());
-
-		auto& st = *(*m_per_dev)[dev_id];
-
-		// Use single-shot command list for small copies (including micro)
-		// This avoids batching overhead for small copies
-		if(bytes <= g_small_threshold) {
-			ze_command_list_handle_t cl{};
-			ze_command_list_desc_t d{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
-			ze_check(zeCommandListCreate(zectx, zedev, &d, &cl), "zeCommandListCreate");
-			ze_check(zeCommandListAppendMemoryCopy(cl, dst, src, bytes, nullptr, 0, nullptr),
-			         "zeCommandListAppendMemoryCopy");
-			ze_check(zeCommandListClose(cl), "zeCommandListClose");
-			ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
-			ze_fence_handle_t f{};
-			ze_check(zeFenceCreate(zeq, &fd, &f), "zeFenceCreate");
-			ze_check(zeCommandQueueExecuteCommandLists(zeq, 1, &cl, f), "zeCommandQueueExecuteCommandLists");
-			ze_check(zeFenceHostSynchronize(f, UINT64_MAX), "zeFenceHostSynchronize");
-			zeFenceDestroy(f);
-			zeCommandListDestroy(cl);
-			return sq.ext_oneapi_submit_barrier();
-		}
-
-		if(g_use_batching) {
-			{
-				std::lock_guard lk(st.batch.mtx);
-				st.batch.append_memcpy(src, dst, bytes);
-				// For correctness: always flush to ensure completion before returning
-				// This ensures the copy is done before the barrier event is used
-				st.batch.flush_and_wait(zeq);
-			}
-			return sq.ext_oneapi_submit_barrier();
-		}
-
-		// fallback: single regular list submit + fence to guarantee completion
-		ze_command_list_handle_t cl{};
-		ze_command_list_desc_t d{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC};
-		ze_check(zeCommandListCreate(zectx, zedev, &d, &cl), "zeCommandListCreate");
-		ze_check(zeCommandListAppendMemoryCopy(cl, dst, src, bytes, nullptr, 0, nullptr),
-		         "zeCommandListAppendMemoryCopy");
-		ze_check(zeCommandListClose(cl), "zeCommandListClose");
-		ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
-		ze_fence_handle_t f{};
-		ze_check(zeFenceCreate(zeq, &fd, &f), "zeFenceCreate");
-		ze_check(zeCommandQueueExecuteCommandLists(zeq, 1, &cl, f), "zeCommandQueueExecuteCommandLists");
-		ze_check(zeFenceHostSynchronize(f, UINT64_MAX), "zeFenceHostSynchronize");
-		zeFenceDestroy(f);
-		zeCommandListDestroy(cl);
-		return sq.ext_oneapi_submit_barrier();
+void cleanup_event_pools() {
+	std::lock_guard<std::mutex> lock(g_pools_mutex);
+	
+	for (auto& pool : g_event_pools) {
+		if (pool) pool->cleanup();
 	}
+	g_event_pools.clear();
+	g_pools_initialized = false;
+}
 
-  private:
-	std::vector<std::unique_ptr<device_state>>* m_per_dev;
-};
+// ============================================================================
+// Helper to perform box-based copy using native Level Zero operations
+// SAME AS v0 but using SYCL's native queue handle (FIX #2)
+// ============================================================================
+void nd_copy_box_level_zero(sycl::queue& queue, device_id device, const void* const source_base, void* const dest_base, const box<3>& source_box, 
+    const box<3>& dest_box, const box<3>& copy_box, const size_t elem_size, sycl::event& last_event) //
+{
+	assert(source_box.covers(copy_box));
+	assert(dest_box.covers(copy_box));
+	
+	// compute layout/strides/offsets
+	const auto src_range = source_box.get_range();
+	const auto dst_range = dest_box.get_range();
+	const auto copy_range = copy_box.get_range();
+	const auto src_offset = copy_box.get_offset() - source_box.get_offset();
+	const auto dst_offset = copy_box.get_offset() - dest_box.get_offset();
+	
+	const auto layout = layout_nd_copy(src_range, dst_range, src_offset, dst_offset, copy_range, elem_size);
+	
+	if(layout.contiguous_size == 0) return;
+	
+	// FIX #2: Extract SYCL's native L0 queue (CORRECT - maintains ordering)
+	auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
+	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+	auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
+	auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+	
+	// Use event pool instead of creating/destroying events
+	size_t event_idx = g_event_pools[device]->acquire();
+	ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
+	
+	// Create command list for batched operations
+	ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
+	ze_command_list_handle_t cmd_list = nullptr;
+	ze_check(zeCommandListCreate(ze_context, ze_device, &cmd_list_desc, &cmd_list), "zeCommandListCreate");
+	
+	if(layout.num_complex_strides == 0) {
+		// 1) Contiguous: single blit
+		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
+		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
+		ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		CELERITY_TRACE("Level-Zero backend: contiguous copy {} bytes", layout.contiguous_size);
+	} else if(layout.num_complex_strides == 1) {
+		// 2) 2D region copy (FIX #6: native 2D copy)
+		const auto& stride = layout.strides[0];
+		const size_t width = layout.contiguous_size;
+		const size_t height = stride.count;
+		const size_t src_pitch = stride.source_stride;
+		const size_t dst_pitch = stride.dest_stride;
+		
+		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
+		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
+		
+		ze_copy_region_t src_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+		ze_copy_region_t dst_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+		
+		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list, dst_ptr, &dst_region, dst_pitch, 0,
+		                                             src_ptr, &src_region, src_pitch, 0, ze_event, 0, nullptr), 
+		         "zeCommandListAppendMemoryCopyRegion");
+		
+		CELERITY_TRACE("Level-Zero backend: 2D copy {}x{} bytes (src_pitch={}, dst_pitch={})", width, height, src_pitch, dst_pitch);
+	} else {
+		// 3) 3D: many 1D copies (signal event on the LAST chunk only)
+		std::vector<std::tuple<size_t, size_t, size_t>> chunks;
+		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
+			chunks.emplace_back(src_off, dst_off, size);
+		});
+		
+		// Now append all copies, signaling event only on the last one
+		for(size_t i = 0; i < chunks.size(); ++i) {
+			const auto& [src_off, dst_off, size] = chunks[i];
+			const void* src_ptr = static_cast<const char*>(source_base) + src_off;
+			void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
+			
+			// Signal event ONLY on the last chunk
+			const bool is_last = (i == chunks.size() - 1);
+			ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
+			
+			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		}
+		
+		CELERITY_TRACE("Level-Zero backend: 3D copy {} chunks of {} bytes", chunks.size(), layout.contiguous_size);
+	}
+	
+	// Execute the command list
+	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
+	
+	// Synchronize the Level Zero queue to ensure all operations complete
+	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+	
+	// Clean up/Destroy Level Zero resources
+	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
+	
+	// Release event back to pool
+	g_event_pools[device]->release(event_idx);
+	
+	// Create SYCL barrier event to integrate with SYCL's event system
+	last_event = queue.ext_oneapi_submit_barrier();
+}
 
-// ND dispatcher using existing layout helpers
-template <typename SubmitContig>
-static inline void dispatch_nd(const void* src_base, void* dst_base,
-                               const region_layout& src_layout, const region_layout& dst_layout,
-                               const region<3>& copy_region, size_t elem_size,
-                               SubmitContig&& submit) {
-	using namespace celerity::detail;
+// Helper function for n-dimensional device copy using native Level Zero
+async_event nd_copy_device_level_zero(sycl::queue& queue, device_id device, const void* const source_base, void* const dest_base, 
+    const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size, bool enable_profiling) //
+{
+	sycl::event last_event;
+	
+	// Use dispatch_nd_region_copy to handle all layout combinations
 	dispatch_nd_region_copy(
-	    src_base, dst_base, src_layout, dst_layout, copy_region, elem_size,
-	    [&](const void* src, void* dst, const box<3>& src_box, const box<3>& dst_box, const box<3>& box_copy) {
-		    const auto layout = layout_nd_copy(src_box.get_range(), dst_box.get_range(),
-		                                      box_copy.get_offset() - src_box.get_offset(),
-		                                      box_copy.get_offset() - dst_box.get_offset(),
-		                                      box_copy.get_range(), elem_size);
-		    if(layout.contiguous_size == 0) return;
-		    // Handle all contiguous chunks in this layout
-		    for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t chunk_bytes) {
-			    submit(static_cast<const std::byte*>(src) + src_off,
-			           static_cast<std::byte*>(dst) + dst_off,
-			           chunk_bytes);
-		    });
+	    source_base, dest_base, source_layout, dest_layout, copy_region, elem_size,
+		// box path
+	    [&queue, device, elem_size, &last_event](const void* const source, void* const dest, const box<3>& source_box, const box<3>& dest_box, const box<3>& copy_box) {
+		    nd_copy_box_level_zero(queue, device, source, dest, source_box, dest_box, copy_box, elem_size, last_event);
 	    },
-	    [&](const void* src, void* dst, size_t bytes) { submit(src, dst, bytes); });
-}
-
-// Public entry used by backend
-static async_event nd_copy_device_level_zero(sycl::queue& sq, device_id dev_id,
-    const void* src_base, void* dst_base, const region_layout& src_layout,
-    const region_layout& dst_layout, const region<3>& copy_region, size_t elem_size, bool profiling,
-    l0_copy_engine& engine) {
-
-	std::optional<sycl::event> first; // we can fill this if profiling later
-	sycl::event last = sq.ext_oneapi_submit_barrier(); // seed
-
-	dispatch_nd(src_base, dst_base, src_layout, dst_layout, copy_region, elem_size,
-	    [&](const void* src, void* dst, size_t bytes){
-		    last = engine.copy_contiguous(sq, dev_id, src, dst, bytes, profiling);
-		    if(profiling && !first) first = last;
+		// linear path
+	    [&queue, device, &last_event](const void* const source, void* const dest, size_t size_bytes) {
+		    CELERITY_TRACE("Level-Zero backend: linear copy {} bytes", size_bytes);
+		    
+		    // FIX #2: Extract SYCL's native L0 queue (CORRECT - maintains ordering)
+		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
+		    auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+		    auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
+		    auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+		    
+		    // Use event pool instead of creating/destroying events
+		    size_t event_idx = g_event_pools[device]->acquire();
+		    ze_event_handle_t ze_event = g_event_pools[device]->get_event(event_idx);
+		    
+		    // Create and execute command list for simple copy
+		    ze_command_list_desc_t cmd_list_desc = {ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, 0, 0};
+		    ze_command_list_handle_t cmd_list = nullptr;
+		    ze_check(zeCommandListCreate(ze_context, ze_device, &cmd_list_desc, &cmd_list), "zeCommandListCreate");
+		    ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
+		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
+		    
+		    // Synchronize the Level Zero queue to ensure all operations complete
+		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+		    
+			// Clean up/Destroy Level Zero resources
+		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
+		    
+		    // Release event back to pool
+		    g_event_pools[device]->release(event_idx);
+		    
+		    // Create SYCL barrier event to integrate with SYCL's event system
+		    last_event = queue.ext_oneapi_submit_barrier();
 	    });
-
-	sycl_backend_detail::flush(sq);
-	return make_async_event<sycl_backend_detail::sycl_event>(std::move(first), std::move(last));
-}
-
-// ---------- Global state ----------
-static std::vector<std::unique_ptr<device_state>> g_states;
-
-static void initialize_all(const std::vector<sycl::device>& devices, ze_context_handle_t zectx) {
-	g_states.clear();
-	g_states.reserve(devices.size());
-	for(size_t i=0;i<devices.size();++i){
-		auto zedev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
-		auto st = std::make_unique<device_state>();
-		st->pool.init(zectx, zedev, g_pool_size);
-		st->init_small(zectx, zedev);
-		g_states.push_back(std::move(st));
-	}
-}
-
-static void cleanup_all() {
-	for(auto& s : g_states) s->destroy();
-	g_states.clear();
+	
+	sycl_backend_detail::flush(queue);
+	return make_async_event<sycl_backend_detail::sycl_event>(std::move(last_event), enable_profiling);
 }
 
 } // namespace celerity::detail::level_zero_backend_detail
@@ -317,44 +318,57 @@ static void cleanup_all() {
 namespace celerity::detail {
 
 sycl_level_zero_backend::sycl_level_zero_backend(const std::vector<sycl::device>& devices, const sycl_backend::configuration& config)
-: sycl_backend(devices, config) {
-	auto zectx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
-	                 devices[0].get_platform().ext_oneapi_get_default_context());
-	level_zero_backend_detail::initialize_all(devices, zectx);
-
-	// peer detection (unchanged logic)
-	for(device_id i=0;i<devices.size();++i){
-		for(device_id j=i+1;j<devices.size();++j){
-			try{
-				const auto di = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
-				const auto dj = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[j]);
-				ze_bool_t ij=false, ji=false;
-				ze_result_t rij = zeDeviceCanAccessPeer(di, dj, &ij);
-				ze_result_t rji = zeDeviceCanAccessPeer(dj, di, &ji);
-				if(rij==ZE_RESULT_SUCCESS && rji==ZE_RESULT_SUCCESS && ij && ji){
-					const memory_id mi = first_device_memory_id + i;
-					const memory_id mj = first_device_memory_id + j;
-					get_system_info().memories[mi].copy_peers.set(mj);
-					get_system_info().memories[mj].copy_peers.set(mi);
+    : sycl_backend(devices, config) {
+	CELERITY_DEBUG("Level-Zero backend initialized with {} device(s)", devices.size());
+	
+	// Initialize event pools
+	auto context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+		devices[0].get_platform().ext_oneapi_get_default_context());
+	level_zero_backend_detail::initialize_event_pools(devices, context);
+	
+	// Query and enable peer-to-peer access between devices
+	for(device_id i = 0; i < devices.size(); ++i) {
+		for(device_id j = i + 1; j < devices.size(); ++j) {
+			try {
+				// Get native Level Zero device handles
+				const auto ze_device_i = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[i]);
+				const auto ze_device_j = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(devices[j]);
+				
+				// Query peer access capabilities
+				ze_bool_t can_access_ij = false;
+				ze_bool_t can_access_ji = false;
+				
+				const auto result_ij = zeDeviceCanAccessPeer(ze_device_i, ze_device_j, &can_access_ij);
+				const auto result_ji = zeDeviceCanAccessPeer(ze_device_j, ze_device_i, &can_access_ji);
+				
+				if(result_ij == ZE_RESULT_SUCCESS && result_ji == ZE_RESULT_SUCCESS && can_access_ij && can_access_ji) {
+					// Both devices can access each other - enable peer access
+					const memory_id mid_i = first_device_memory_id + i;
+					const memory_id mid_j = first_device_memory_id + j;
+					get_system_info().memories[mid_i].copy_peers.set(mid_j);
+					get_system_info().memories[mid_j].copy_peers.set(mid_i);
+					CELERITY_DEBUG("Level-Zero backend: enabled peer access between D{} and D{}", i, j);
+				} else {
+					CELERITY_DEBUG("Level-Zero backend: no peer access between D{} and D{}, device-to-device copies will be staged in host memory", i, j);
 				}
-			} catch(const std::exception& e){
-				CELERITY_WARN("Level-Zero: peer access query failed: {}", e.what());
+			} catch(const std::exception& e) {
+				CELERITY_WARN("Level-Zero backend: failed to query peer access between D{} and D{}: {}", i, j, e.what());
 			}
 		}
 	}
 }
 
 sycl_level_zero_backend::~sycl_level_zero_backend() {
-	level_zero_backend_detail::cleanup_all();
+	level_zero_backend_detail::cleanup_event_pools();
 }
 
-async_event sycl_level_zero_backend::enqueue_device_copy(device_id device, size_t device_lane,
-    const void* src_base, void* dst_base, const region_layout& src_layout, const region_layout& dst_layout,
-    const region<3>& copy_region, size_t elem_size) {
-	return enqueue_device_work(device, device_lane, [=, this](sycl::queue& q) {
-		using namespace level_zero_backend_detail;
-		static l0_copy_engine engine(&g_states);
-		return nd_copy_device_level_zero(q, device, src_base, dst_base, src_layout, dst_layout, copy_region, elem_size, is_profiling_enabled(), engine);
+async_event sycl_level_zero_backend::enqueue_device_copy(device_id device, size_t device_lane, const void* const source_base, void* const dest_base,
+    const region_layout& source_layout, const region_layout& dest_layout, const region<3>& copy_region, const size_t elem_size) //
+{
+	// FIX #1: No static engine - pass device_id to functions that need it
+	return enqueue_device_work(device, device_lane, [=, this](sycl::queue& queue) {
+		return level_zero_backend_detail::nd_copy_device_level_zero(
+		    queue, device, source_base, dest_base, source_layout, dest_layout, copy_region, elem_size, is_profiling_enabled());
 	});
 }
 
