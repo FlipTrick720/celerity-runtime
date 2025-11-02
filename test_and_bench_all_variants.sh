@@ -71,7 +71,7 @@ VARIANT_HEADERS[variant2]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant3]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant4]="include/backend/sycl_backend copy 1.h"
 VARIANT_HEADERS[variant5]="include/backend/sycl_backend copy 1.h"
-VARIANT_HEADERS[variant6]="include/backend/sycl_backend copy 1.h"
+VARIANT_HEADERS[variant6]="include/backend/sycl_backend copy 2.h"
 
 # Test each variant
 for variant in variant6 variant4 baseline variant1 variant2 variant3 variant5; do
