@@ -16,6 +16,8 @@ VERSIONS=(
     "v4_micro_optimized"
     "v5_No_Sync"
     "v6_corrected_exact_fixes"
+    "v7_async_fence_optimized"
+    "v8_aggressive_batch"
 )
 
 
