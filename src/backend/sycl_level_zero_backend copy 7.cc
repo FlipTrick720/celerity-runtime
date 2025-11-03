@@ -129,9 +129,8 @@ public:
 		ze_check(zeCommandListCreate(ctx, dev, &d, &m_cl[0]), "zeCommandListCreate");
 		ze_check(zeCommandListCreate(ctx, dev, &d, &m_cl[1]), "zeCommandListCreate");
 		
-		// Create fence for async tracking
-		ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
-		ze_check(zeFenceCreate(nullptr, &fd, &m_fence), "zeFenceCreate");
+		// Note: Fence will be created lazily when we have a queue
+		m_fence = nullptr;
 		
 		m_batch_start = std::chrono::steady_clock::now();
 	}
@@ -211,6 +210,12 @@ public:
 	void submit_async(ze_command_queue_handle_t zeq) {
 		if(m_pending_ops == 0) return;
 		
+		// Lazy fence creation (needs queue)
+		if(m_fence == nullptr) {
+			ze_fence_desc_t fd{ZE_STRUCTURE_TYPE_FENCE_DESC};
+			ze_check(zeFenceCreate(zeq, &fd, &m_fence), "zeFenceCreate");
+		}
+		
 		// Wait for previous batch if still in flight
 		if(m_in_flight) wait_for_completion();
 		
@@ -255,9 +260,11 @@ public:
 			CELERITY_WARN("L0 batch destroyed with {} pending operations - data loss possible", m_pending_ops);
 		}
 		
-		CELERITY_DEBUG("L0 batch stats: {} batches, {} ops total (avg {:.1f} ops/batch)",
-		              m_total_batches, m_total_ops,
-		              m_total_batches > 0 ? static_cast<double>(m_total_ops) / m_total_batches : 0.0);
+		if(m_total_batches > 0) {
+			CELERITY_DEBUG("L0 batch stats: {} batches, {} ops total (avg {:.1f} ops/batch)",
+			              m_total_batches, m_total_ops,
+			              m_total_batches > 0 ? static_cast<double>(m_total_ops) / m_total_batches : 0.0);
+		}
 		
 		if(m_fence) zeFenceDestroy(m_fence);
 		if(m_cl[0]) zeCommandListDestroy(m_cl[0]);
