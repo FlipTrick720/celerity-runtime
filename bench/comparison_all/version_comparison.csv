@@ -107,3 +107,15 @@ v8_aggressive_batch,D2H,Sync,Yes,10.53,4.27
 v8_aggressive_batch,D2H,Sync,No,7.28,1.94
 v8_aggressive_batch,D2H,Batch,Yes,10.59,9.09
 v8_aggressive_batch,D2H,Batch,No,10.55,8.84
+v9_adaptive_coalescing,D2D,Sync,Yes,189.44,6.16
+v9_adaptive_coalescing,D2D,Sync,No,189.08,6.46
+v9_adaptive_coalescing,D2D,Batch,Yes,208.35,41.18
+v9_adaptive_coalescing,D2D,Batch,No,208.25,41.51
+v9_adaptive_coalescing,H2D,Sync,Yes,10.22,4.12
+v9_adaptive_coalescing,H2D,Sync,No,7.83,2.09
+v9_adaptive_coalescing,H2D,Batch,Yes,10.28,8.22
+v9_adaptive_coalescing,H2D,Batch,No,10.25,8.10
+v9_adaptive_coalescing,D2H,Sync,Yes,10.53,4.28
+v9_adaptive_coalescing,D2H,Sync,No,7.95,2.20
+v9_adaptive_coalescing,D2H,Batch,Yes,10.59,9.15
+v9_adaptive_coalescing,D2H,Batch,No,10.55,8.96

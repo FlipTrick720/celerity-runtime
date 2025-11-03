@@ -18,6 +18,7 @@ VERSIONS=(
     "v6_corrected_exact_fixes"
     "v7_async_fence_optimized"
     "v8_aggressive_batch"
+    "v9_adaptive_coalescing"
 )
 
 
