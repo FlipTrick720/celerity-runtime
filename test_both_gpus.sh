@@ -1,10 +1,10 @@
 #!/bin/bash
 # Test both GPUs to see if there's a performance difference
 
-set -e
-
-# Load oneAPI
-source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1
+# Load oneAPI (don't exit on error)
+if [ -f /opt/intel/oneapi/setvars.sh ]; then
+    source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1 || true
+fi
 
 echo "========================================"
 echo "Testing Both Arc A770 GPUs"
