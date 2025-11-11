@@ -357,6 +357,7 @@ if [[ $status -ne 0 ]]; then
 fi
 
 # -------- final summary --------
+for v in "${unset_vars[@]}"; do unset "$v" || true; done
 echo
 echo "=========================================="
 echo ":: TEST RUN COMPLETE"
