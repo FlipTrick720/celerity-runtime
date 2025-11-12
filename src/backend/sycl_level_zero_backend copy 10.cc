@@ -323,6 +323,10 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
 	auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
 	auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+
+	// Ensure ordering with previously submitted SYCL work on this queue
+	// Immediate command lists are not ordered relative to SYCL queue contents.
+	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize(pre)");
 	
     // Persistent resources
     auto& pool = ensure_event_pool(ze_context, ze_device);
@@ -411,6 +415,8 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
 	    },
 		// linear path
         [&queue, &last_event, enable_profiling, &native_time](const void* const source, void* const dest, size_t size_bytes) {
+            // Skip empty copies to avoid unnecessary L0 work
+            if(size_bytes == 0) { last_event = sycl::event{}; return; }
             CELERITY_TRACE("Level-Zero backend: linear copy {} bytes", size_bytes);
 
             auto ctx = queue.get_context();
@@ -430,6 +436,9 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
             auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
             auto& im_mgr = ensure_immediate_cmdlist(ze_context, ze_device, ze_queue);
             auto& pool = ensure_event_pool(ze_context, ze_device);
+
+            // Ensure ordering with prior SYCL submissions before issuing immediate L0 copies
+            ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize(pre)");
 
             const bool allow_stage = env_bool("CELERITY_L0_STAGE_PAGEABLE", true);
             const size_t stage_mb = env_size_t("CELERITY_L0_STAGE_BUF_SIZE_MB", 16);
