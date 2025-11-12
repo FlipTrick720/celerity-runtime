@@ -89,7 +89,9 @@ static event_pool_mgr& ensure_event_pool(ze_context_handle_t ctx, ze_device_hand
     ctx_dev_key key{ctx, dev};
     auto it = g_event_pools.find(key);
     if(it != g_event_pools.end()) return it->second;
-    event_pool_mgr mgr;
+    
+    // Construct directly in the map to avoid moving non-movable mutex
+    auto& mgr = g_event_pools[key];
     mgr.ctx = ctx;
     mgr.dev = dev;
     const size_t pool_size = env_size_t("CELERITY_L0_EVENT_POOL_SIZE", 512);
@@ -108,8 +110,7 @@ static event_pool_mgr& ensure_event_pool(ze_context_handle_t ctx, ze_device_hand
         ze_check(zeEventCreate(mgr.pool, &e, &mgr.events[i]), "zeEventCreate");
         mgr.free_indices.push(i);
     }
-    auto [ins_it, _] = g_event_pools.try_emplace(key, std::move(mgr));
-    return ins_it->second;
+    return mgr;
 }
 
 struct acquired_event {
@@ -167,14 +168,15 @@ static cmdlist_mgr& ensure_cmdlist(ze_context_handle_t ctx, ze_device_handle_t d
     std::lock_guard<std::mutex> lock(g_global_mtx);
     auto it = g_cmdlists.find(ze_queue);
     if(it != g_cmdlists.end()) return it->second;
-    cmdlist_mgr mgr;
+    
+    // Construct directly in the map to avoid moving non-movable mutex
+    auto& mgr = g_cmdlists[ze_queue];
     ze_command_list_desc_t desc{};
     desc.stype = ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC;
     desc.flags = 0;
     // Use default group; we execute on the same SYCL queue to preserve ordering
     ze_check(zeCommandListCreate(ctx, dev, &desc, &mgr.list), "zeCommandListCreate");
-    auto [ins_it, _] = g_cmdlists.try_emplace(ze_queue, std::move(mgr));
-    return ins_it->second;
+    return mgr;
 }
 
 // Simple async_event that carries a native execution time if profiling is enabled
