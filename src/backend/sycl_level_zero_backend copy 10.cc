@@ -14,6 +14,7 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstring>
 #include <utility>
 #include <vector>
 #include <string>
@@ -66,8 +67,15 @@ struct cmdlist_mgr {
     std::mutex mtx;
 };
 
+// Immediate command-list per SYCL queue (to avoid close/execute/reset overhead)
+struct immediate_cmdlist_mgr {
+    ze_command_list_handle_t list = nullptr;
+    std::mutex mtx;
+};
+
 static std::unordered_map<ctx_dev_key, event_pool_mgr, ctx_dev_key_hash> g_event_pools;
 static std::unordered_map<ze_command_queue_handle_t, cmdlist_mgr> g_cmdlists;
+static std::unordered_map<ze_command_queue_handle_t, immediate_cmdlist_mgr> g_immediate_cmdlists;
 static std::mutex g_global_mtx;
 
 static size_t env_size_t(const char* name, size_t def) {
@@ -179,6 +187,60 @@ static cmdlist_mgr& ensure_cmdlist(ze_context_handle_t ctx, ze_device_handle_t d
     return mgr;
 }
 
+static immediate_cmdlist_mgr& ensure_immediate_cmdlist(ze_context_handle_t ctx, ze_device_handle_t dev, ze_command_queue_handle_t ze_queue) {
+    std::lock_guard<std::mutex> lock(g_global_mtx);
+    auto it = g_immediate_cmdlists.find(ze_queue);
+    if(it != g_immediate_cmdlists.end()) return it->second;
+
+    auto& mgr = g_immediate_cmdlists[ze_queue];
+    ze_command_queue_desc_t qd{};
+    qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+    qd.ordinal = 0;
+    qd.index = 0;
+    qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    ze_check(zeCommandListCreateImmediate(ctx, dev, &qd, &mgr.list), "zeCommandListCreateImmediate");
+    return mgr;
+}
+
+// Simple pinned host staging pool (double/triple buffering) to accelerate pageable H2D/D2H
+struct staging_pool_mgr {
+    sycl::context sycl_ctx;
+    size_t buf_size = 0;
+    std::vector<void*> bufs;
+    std::queue<size_t> free_idx;
+    std::mutex mtx;
+};
+
+static std::unordered_map<ze_command_queue_handle_t, staging_pool_mgr> g_staging_pools;
+
+static staging_pool_mgr& ensure_staging_pool(ze_command_queue_handle_t ze_queue, const sycl::context& ctx, size_t buf_size, size_t num_bufs) {
+    std::lock_guard<std::mutex> lock(g_global_mtx);
+    auto it = g_staging_pools.find(ze_queue);
+    if(it != g_staging_pools.end()) return it->second;
+    auto& mgr = g_staging_pools[ze_queue];
+    mgr.sycl_ctx = ctx;
+    mgr.buf_size = buf_size;
+    mgr.bufs.resize(num_bufs, nullptr);
+    for(size_t i = 0; i < num_bufs; ++i) {
+        mgr.bufs[i] = sycl::aligned_alloc_host(4096, buf_size, ctx);
+        mgr.free_idx.push(i);
+    }
+    return mgr;
+}
+
+static size_t acquire_staging_buffer(staging_pool_mgr& mgr) {
+    std::lock_guard<std::mutex> lk(mgr.mtx);
+    if(mgr.free_idx.empty()) return SIZE_MAX;
+    auto idx = mgr.free_idx.front();
+    mgr.free_idx.pop();
+    return idx;
+}
+
+static void release_staging_buffer(staging_pool_mgr& mgr, size_t idx) {
+    std::lock_guard<std::mutex> lk(mgr.mtx);
+    mgr.free_idx.push(idx);
+}
+
 // Simple async_event that carries a native execution time if profiling is enabled
 class native_timed_event final : public async_event_impl {
   public:
@@ -266,66 +328,64 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
     auto& pool = ensure_event_pool(ze_context, ze_device);
     const auto ev = acquire_event(pool);
     ze_event_handle_t ze_event = ev.handle;
-    auto& cl_mgr = ensure_cmdlist(ze_context, ze_device, ze_queue);
-    ze_command_list_handle_t cmd_list = cl_mgr.list;
-	
-	if(layout.num_complex_strides == 0) {
-		// 1) Contiguous: single blit
-		// Single contiguous copy
-		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
-		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
-		ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
-		CELERITY_TRACE("Level-Zero backend: contiguous copy {} bytes", layout.contiguous_size);
-	} else if(layout.num_complex_strides == 1) {
-		// 2) 2D region copy
-		// Optimized 2D copy using Level Zero's native 2D copy operation
-		const auto& stride = layout.strides[0];
-		const size_t width = layout.contiguous_size;
-		const size_t height = stride.count;
-		const size_t src_pitch = stride.source_stride;
-		const size_t dst_pitch = stride.dest_stride;
-		
-		const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
-		void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
-		
-		ze_copy_region_t src_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-		ze_copy_region_t dst_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-		
-		ze_check(zeCommandListAppendMemoryCopyRegion(cmd_list, dst_ptr, &dst_region, dst_pitch, 0,
-		                                             src_ptr, &src_region, src_pitch, 0, ze_event, 0, nullptr), 
-		         "zeCommandListAppendMemoryCopyRegion");
-		
-		CELERITY_TRACE("Level-Zero backend: 2D copy {}x{} bytes (src_pitch={}, dst_pitch={})", width, height, src_pitch, dst_pitch);
-	} else {
-		// 3) 3D: many 1D copies (signal event on the LAST chunk only)
-		// Multiple 1D copies for complex 3D layouts
-		// First, collect all chunks to know which is the last one
-		std::vector<std::tuple<size_t, size_t, size_t>> chunks;
-		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
-			chunks.emplace_back(src_off, dst_off, size);
-		});
-		
-		// Now append all copies, signaling event only on the last one
-		for(size_t i = 0; i < chunks.size(); ++i) {
-			const auto& [src_off, dst_off, size] = chunks[i];
-			const void* src_ptr = static_cast<const char*>(source_base) + src_off;
-			void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
-			
-			// Signal event ONLY on the last chunk
-			const bool is_last = (i == chunks.size() - 1);
-			ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
-			
-			ze_check(zeCommandListAppendMemoryCopy(cmd_list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
-		}
-		
-		CELERITY_TRACE("Level-Zero backend: 3D copy {} chunks of {} bytes", chunks.size(), layout.contiguous_size);
-	}
-	
-    // Execute and wait for just the event; then reset list for reuse
-    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
-    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
+    auto& im_mgr = ensure_immediate_cmdlist(ze_context, ze_device, ze_queue);
+
+    if(layout.num_complex_strides == 0) {
+        // 1) Contiguous: single blit
+        // Single contiguous copy
+        const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
+        void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
+        std::lock_guard<std::mutex> g(im_mgr.mtx);
+        ze_check(zeCommandListAppendMemoryCopy(im_mgr.list, dst_ptr, src_ptr, layout.contiguous_size, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
+        CELERITY_TRACE("Level-Zero backend: contiguous copy {} bytes", layout.contiguous_size);
+    } else if(layout.num_complex_strides == 1) {
+        // 2) 2D region copy
+        // Optimized 2D copy using Level Zero's native 2D copy operation
+        const auto& stride = layout.strides[0];
+        const size_t width = layout.contiguous_size;
+        const size_t height = stride.count;
+        const size_t src_pitch = stride.source_stride;
+        const size_t dst_pitch = stride.dest_stride;
+        
+        const void* src_ptr = static_cast<const char*>(source_base) + layout.offset_in_source;
+        void* dst_ptr = static_cast<char*>(dest_base) + layout.offset_in_dest;
+        
+        ze_copy_region_t src_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+        ze_copy_region_t dst_region = {0, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+        
+        std::lock_guard<std::mutex> g(im_mgr.mtx);
+        ze_check(zeCommandListAppendMemoryCopyRegion(im_mgr.list, dst_ptr, &dst_region, dst_pitch, 0,
+                                                     src_ptr, &src_region, src_pitch, 0, ze_event, 0, nullptr), 
+                 "zeCommandListAppendMemoryCopyRegion");
+        
+        CELERITY_TRACE("Level-Zero backend: 2D copy {}x{} bytes (src_pitch={}, dst_pitch={})", width, height, src_pitch, dst_pitch);
+    } else {
+        // 3) 3D: many 1D copies (signal event on the LAST chunk only)
+        // Multiple 1D copies for complex 3D layouts
+        // First, collect all chunks to know which is the last one
+        std::vector<std::tuple<size_t, size_t, size_t>> chunks;
+        for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t size) {
+            chunks.emplace_back(src_off, dst_off, size);
+        });
+        
+        // Now append all copies, signaling event only on the last one
+        for(size_t i = 0; i < chunks.size(); ++i) {
+            const auto& [src_off, dst_off, size] = chunks[i];
+            const void* src_ptr = static_cast<const char*>(source_base) + src_off;
+            void* dst_ptr = static_cast<char*>(dest_base) + dst_off;
+            
+            // Signal event ONLY on the last chunk
+            const bool is_last = (i == chunks.size() - 1);
+            ze_event_handle_t event_to_use = is_last ? ze_event : nullptr;
+            
+            std::lock_guard<std::mutex> g(im_mgr.mtx);
+            ze_check(zeCommandListAppendMemoryCopy(im_mgr.list, dst_ptr, src_ptr, size, event_to_use, 0, nullptr), "zeCommandListAppendMemoryCopy");
+        }
+        
+        CELERITY_TRACE("Level-Zero backend: 3D copy {} chunks of {} bytes", chunks.size(), layout.contiguous_size);
+    }
+    
     ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
-    ze_check(zeCommandListReset(cmd_list), "zeCommandListReset");
     release_event(pool, ev);
 
     // We already synchronized on host; return a dummy event (we'll report completion separately)
@@ -350,31 +410,129 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
 		    if(enable_profiling) native_time = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0);
 	    },
 		// linear path
-	    [&queue, &last_event, enable_profiling, &native_time](const void* const source, void* const dest, size_t size_bytes) {
-		    CELERITY_TRACE("Level-Zero backend: linear copy {} bytes", size_bytes);
-		    
-		    // Get native Level Zero handles
-		    auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
-		    auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
-		    auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
-		    auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
-		    
-            // Persistent resources and execution
+        [&queue, &last_event, enable_profiling, &native_time](const void* const source, void* const dest, size_t size_bytes) {
+            CELERITY_TRACE("Level-Zero backend: linear copy {} bytes", size_bytes);
+
+            auto ctx = queue.get_context();
+            // Determine pointer types to detect H2D/D2H and whether host is pinned
+            auto pt_src = sycl::get_pointer_type(const_cast<void*>(source), ctx);
+            auto pt_dst = sycl::get_pointer_type(dest, ctx);
+
+            const bool src_dev = (pt_src == sycl::usm::alloc::device);
+            const bool dst_dev = (pt_dst == sycl::usm::alloc::device);
+            const bool src_pinned_host = (pt_src == sycl::usm::alloc::host) || (pt_src == sycl::usm::alloc::shared);
+            const bool dst_pinned_host = (pt_dst == sycl::usm::alloc::host) || (pt_dst == sycl::usm::alloc::shared);
+
+            // Native handles
+            auto ze_queue_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue);
+            auto ze_queue = std::get<ze_command_queue_handle_t>(ze_queue_variant);
+            auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(ctx);
+            auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
+            auto& im_mgr = ensure_immediate_cmdlist(ze_context, ze_device, ze_queue);
             auto& pool = ensure_event_pool(ze_context, ze_device);
-            const auto ev = acquire_event(pool);
-            ze_event_handle_t ze_event = ev.handle;
-            auto& cl_mgr = ensure_cmdlist(ze_context, ze_device, ze_queue);
-            ze_command_list_handle_t cmd_list = cl_mgr.list;
+
+            const bool allow_stage = env_bool("CELERITY_L0_STAGE_PAGEABLE", true);
+            const size_t stage_mb = env_size_t("CELERITY_L0_STAGE_BUF_SIZE_MB", 16);
+            const size_t stage_bufs = std::max<size_t>(2, env_size_t("CELERITY_L0_STAGE_BUFFERS", 2));
+            const size_t stage_size = stage_mb * (1ull << 20);
+
+            auto submit_copy = [&](void* d, const void* s, size_t n, ze_event_handle_t evt) {
+                std::lock_guard<std::mutex> g(im_mgr.mtx);
+                ze_check(zeCommandListAppendMemoryCopy(im_mgr.list, d, s, n, evt, 0, nullptr), "zeCommandListAppendMemoryCopy");
+            };
+
             const auto t0 = std::chrono::steady_clock::now();
-            ze_check(zeCommandListAppendMemoryCopy(cmd_list, dest, source, size_bytes, ze_event, 0, nullptr), "zeCommandListAppendMemoryCopy");
-            ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
-            ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
-            ze_check(zeEventHostSynchronize(ze_event, UINT64_MAX), "zeEventHostSynchronize");
-            ze_check(zeCommandListReset(cmd_list), "zeCommandListReset");
-            release_event(pool, ev);
+
+            if(dst_dev && !src_dev) {
+                // H2D
+                if(src_pinned_host || !allow_stage) {
+                    const auto ev = acquire_event(pool);
+                    submit_copy(dest, source, size_bytes, ev.handle);
+                    ze_check(zeEventHostSynchronize(ev.handle, UINT64_MAX), "zeEventHostSynchronize");
+                    release_event(pool, ev);
+                } else {
+                    // Stage pageable -> pinned -> device with double-buffering
+                    auto& sp = ensure_staging_pool(ze_queue, ctx, stage_size, stage_bufs);
+                    std::vector<acquired_event> evs(stage_bufs);
+                    size_t offset = 0;
+                    size_t issued = 0;
+                    // Pre-acquire events
+                    for(size_t i = 0; i < stage_bufs; ++i) evs[i] = acquire_event(pool);
+                    while(offset < size_bytes) {
+                        const size_t chunk = std::min(stage_size, size_bytes - offset);
+                        const size_t idx = issued % stage_bufs;
+                        // Wait for reuse if we've wrapped around
+                        if(issued >= stage_bufs) {
+                            ze_check(zeEventHostSynchronize(evs[idx].handle, UINT64_MAX), "zeEventHostSynchronize");
+                        }
+                        // Fill staging buffer
+                        std::memcpy(sp.bufs[idx], static_cast<const char*>(source) + offset, chunk);
+                        // Submit DMA from staging to device
+                        submit_copy(static_cast<char*>(dest) + offset, sp.bufs[idx], chunk, evs[idx].handle);
+                        offset += chunk;
+                        ++issued;
+                    }
+                    // Wait the last used event
+                    if(issued > 0) {
+                        const size_t last_idx = (issued - 1) % stage_bufs;
+                        ze_check(zeEventHostSynchronize(evs[last_idx].handle, UINT64_MAX), "zeEventHostSynchronize");
+                    }
+                    for(size_t i = 0; i < stage_bufs; ++i) release_event(pool, evs[i]);
+                }
+            } else if(src_dev && !dst_dev) {
+                // D2H
+                if(dst_pinned_host || !allow_stage) {
+                    const auto ev = acquire_event(pool);
+                    submit_copy(dest, source, size_bytes, ev.handle);
+                    ze_check(zeEventHostSynchronize(ev.handle, UINT64_MAX), "zeEventHostSynchronize");
+                    release_event(pool, ev);
+                } else {
+                    // Stage device -> pinned -> pageable with double-buffering
+                    auto& sp = ensure_staging_pool(ze_queue, ctx, stage_size, stage_bufs);
+                    std::vector<acquired_event> evs(stage_bufs);
+                    size_t offset = 0;
+                    size_t issued = 0;
+                    for(size_t i = 0; i < stage_bufs; ++i) evs[i] = acquire_event(pool);
+                    // Pipeline: queue DMA into staging; when buffer reused, synchronize previous DMA then memcpy to pageable
+                    while(offset < size_bytes) {
+                        const size_t chunk = std::min(stage_size, size_bytes - offset);
+                        const size_t idx = issued % stage_bufs;
+                        if(issued >= stage_bufs) {
+                            // Ensure previous DMA into this buffer finished, then copy out to pageable
+                            ze_check(zeEventHostSynchronize(evs[idx].handle, UINT64_MAX), "zeEventHostSynchronize");
+                            const size_t copy_off = (issued - stage_bufs) * stage_size;
+                            const size_t prev_chunk = std::min(stage_size, size_bytes - copy_off);
+                            std::memcpy(static_cast<char*>(dest) + copy_off, sp.bufs[idx], prev_chunk);
+                        }
+                        // Schedule next DMA into this buffer
+                        submit_copy(sp.bufs[idx], static_cast<const char*>(source) + offset, chunk, evs[idx].handle);
+                        offset += chunk;
+                        ++issued;
+                    }
+                    // Drain remaining staged buffers in order
+                    const size_t total_chunks = issued;
+                    const size_t drain = std::min(stage_bufs, total_chunks);
+                    for(size_t k = 0; k < drain; ++k) {
+                        const size_t idx = (total_chunks - drain + k) % stage_bufs;
+                        ze_check(zeEventHostSynchronize(evs[idx].handle, UINT64_MAX), "zeEventHostSynchronize");
+                        // Compute remaining offset for this buffer
+                        const size_t chunk_index = total_chunks - drain + k;
+                        const size_t copy_off = chunk_index * stage_size;
+                        const size_t prev_chunk = std::min(stage_size, size_bytes - copy_off);
+                        std::memcpy(static_cast<char*>(dest) + copy_off, sp.bufs[idx], prev_chunk);
+                    }
+                    for(size_t i = 0; i < stage_bufs; ++i) release_event(pool, evs[i]);
+                }
+            } else {
+                // D2D or unsupported combo: fall back to direct copy via immediate list
+                const auto ev = acquire_event(pool);
+                submit_copy(dest, source, size_bytes, ev.handle);
+                ze_check(zeEventHostSynchronize(ev.handle, UINT64_MAX), "zeEventHostSynchronize");
+                release_event(pool, ev);
+            }
+
             const auto t1 = std::chrono::steady_clock::now();
             if(enable_profiling) native_time = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0);
-            // No SYCL barrier needed; we already synchronized
             last_event = sycl::event{};
         });
 
