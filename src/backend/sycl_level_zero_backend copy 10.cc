@@ -108,7 +108,7 @@ static event_pool_mgr& ensure_event_pool(ze_context_handle_t ctx, ze_device_hand
         ze_check(zeEventCreate(mgr.pool, &e, &mgr.events[i]), "zeEventCreate");
         mgr.free_indices.push(i);
     }
-    auto [ins_it, _] = g_event_pools.emplace(key, std::move(mgr));
+    auto [ins_it, _] = g_event_pools.try_emplace(key, std::move(mgr));
     return ins_it->second;
 }
 
@@ -173,7 +173,7 @@ static cmdlist_mgr& ensure_cmdlist(ze_context_handle_t ctx, ze_device_handle_t d
     desc.flags = 0;
     // Use default group; we execute on the same SYCL queue to preserve ordering
     ze_check(zeCommandListCreate(ctx, dev, &desc, &mgr.list), "zeCommandListCreate");
-    auto [ins_it, _] = g_cmdlists.emplace(ze_queue, mgr);
+    auto [ins_it, _] = g_cmdlists.try_emplace(ze_queue, std::move(mgr));
     return ins_it->second;
 }
 
