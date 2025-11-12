@@ -324,15 +324,23 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	auto ze_context = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
 	auto ze_device = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
 
-	// Ensure ordering with previously submitted SYCL work on this queue
-	// Immediate command lists are not ordered relative to SYCL queue contents.
-	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize(pre)");
+    // Ensure ordering with previously submitted SYCL work on this queue without host blocking:
+    // Submit a SYCL barrier, convert it to a native L0 event, and wait on it from the immediate list.
+    sycl::event dep = queue.ext_oneapi_submit_barrier();
+    auto ze_dep_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(dep);
+    auto ze_dep_event = std::get<ze_event_handle_t>(ze_dep_variant);
 	
     // Persistent resources
     auto& pool = ensure_event_pool(ze_context, ze_device);
     const auto ev = acquire_event(pool);
     ze_event_handle_t ze_event = ev.handle;
     auto& im_mgr = ensure_immediate_cmdlist(ze_context, ze_device, ze_queue);
+
+    // Make immediate list wait for prior SYCL work once per call
+    {
+        std::lock_guard<std::mutex> g(im_mgr.mtx);
+        ze_check(zeCommandListAppendWaitOnEvents(im_mgr.list, 1, &ze_dep_event), "zeCommandListAppendWaitOnEvents");
+    }
 
     if(layout.num_complex_strides == 0) {
         // 1) Contiguous: single blit
@@ -437,16 +445,24 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
             auto& im_mgr = ensure_immediate_cmdlist(ze_context, ze_device, ze_queue);
             auto& pool = ensure_event_pool(ze_context, ze_device);
 
-            // Ensure ordering with prior SYCL submissions before issuing immediate L0 copies
-            ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize(pre)");
+            // Ensure ordering with prior SYCL submissions without host blocking
+            sycl::event dep = queue.ext_oneapi_submit_barrier();
+            auto ze_dep_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(dep);
+            auto ze_dep_event = std::get<ze_event_handle_t>(ze_dep_variant);
 
             const bool allow_stage = env_bool("CELERITY_L0_STAGE_PAGEABLE", true);
             const size_t stage_mb = env_size_t("CELERITY_L0_STAGE_BUF_SIZE_MB", 16);
             const size_t stage_bufs = std::max<size_t>(2, env_size_t("CELERITY_L0_STAGE_BUFFERS", 2));
             const size_t stage_size = stage_mb * (1ull << 20);
 
+            bool inserted_wait = false;
             auto submit_copy = [&](void* d, const void* s, size_t n, ze_event_handle_t evt) {
                 std::lock_guard<std::mutex> g(im_mgr.mtx);
+                // First time we touch the list in this call, insert a wait on dep
+                if(!inserted_wait) {
+                    ze_check(zeCommandListAppendWaitOnEvents(im_mgr.list, 1, &ze_dep_event), "zeCommandListAppendWaitOnEvents");
+                    inserted_wait = true;
+                }
                 ze_check(zeCommandListAppendMemoryCopy(im_mgr.list, d, s, n, evt, 0, nullptr), "zeCommandListAppendMemoryCopy");
             };
 
