@@ -84,7 +84,8 @@ VARIANT_HEADERS[variant10]="include/backend/sycl_backend copy 2.h"
 VARIANT_HEADERS[variant11]="include/backend/sycl_backend copy 2.h"
 
 # Test each variant
-for variant in variant11 baseline variant10 variant1 variant2 variant3 variant4 variant5 variant6 variant7 variant8 variant9; do
+for variant in baseline variant6 variant9 variant1 variant2 variant3 variant4 variant5 variant7 variant8 variant10 variant11; do
+
     echo ""
     echo "========================================="
     echo "Testing: $variant"
