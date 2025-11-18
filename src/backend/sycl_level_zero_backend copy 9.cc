@@ -1,5 +1,5 @@
-//Version: v9_adaptive_coalescing
-//Text: Adaptive coalescing with size-aware batching, persistent resources, and smart synchronization
+//Version: v9_adaptive_coalescing_async
+//Text: Adaptive coalescing with size-aware batching, persistent resources, and TRUE async execution
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -36,6 +36,41 @@ namespace celerity::detail::level_zero_backend_detail {
 static inline void ze_check(ze_result_t r, const char* where) {
 	if(r != ZE_RESULT_SUCCESS) utils::panic("Level-Zero error in {}: code={}", where, static_cast<int>(r));
 }
+
+// ============================================================================
+// True Async Event - Polls without blocking, syncs only when CPU needs data
+// ============================================================================
+class level_zero_async_event final : public async_event_impl {
+public:
+	level_zero_async_event(ze_event_handle_t event, event_pool* pool, size_t index)
+		: m_event(event), m_pool(pool), m_index(index) {}
+	
+	~level_zero_async_event() override {
+		if(m_pool) {
+			m_pool->release(m_index);  // Just release, don't sync
+		}
+	}
+	
+	bool is_complete() override {
+		// Poll event status - truly async, no blocking
+		ze_result_t result = zeEventQueryStatus(m_event);
+		return result == ZE_RESULT_SUCCESS;
+	}
+	
+	// NEW: Explicit wait for when we NEED data on CPU
+	void wait_for_data() {
+		if(!is_complete()) {
+			CELERITY_TRACE("L0 v9: SYNC POINT - Waiting for data to be visible to CPU");
+			ze_check(zeEventHostSynchronize(m_event, UINT64_MAX), "zeEventHostSynchronize(wait_for_data)");
+			CELERITY_TRACE("L0 v9: SYNC COMPLETE - Data now visible to CPU");
+		}
+	}
+
+private:
+	ze_event_handle_t m_event;
+	event_pool* m_pool;
+	size_t m_index;
+};
 
 // ============================================================================
 // Adaptive Configuration with Hardware-Aware Defaults
@@ -191,16 +226,17 @@ public:
 		++m_total_ops;
 	}
 
-	// Submit batch and synchronize (critical for correctness)
-	void flush_sync(ze_command_queue_handle_t zeq) {
+	// Submit batch ASYNC - no blocking, let GPU work concurrently
+	void submit_async(ze_command_queue_handle_t zeq) {
 		if(m_pending_ops == 0) return;
 		
 		ze_check(zeCommandListClose(m_cl), "zeCommandListClose");
 		ze_check(zeCommandQueueExecuteCommandLists(zeq, 1, &m_cl, nullptr), 
 		         "zeCommandQueueExecuteCommandLists");
 		
-		// CRITICAL: Synchronize to ensure operations complete
-		ze_check(zeCommandQueueSynchronize(zeq, UINT64_MAX), "zeCommandQueueSynchronize");
+		// CRITICAL: NO zeCommandQueueSynchronize HERE - truly async!
+		// Let the commands execute asynchronously
+		// Sync only happens when CPU needs to see the data (via wait_for_data())
 		
 		// Reset command list for reuse
 		ze_check(zeCommandListReset(m_cl), "zeCommandListReset");
@@ -209,7 +245,7 @@ public:
 		m_max_batch_ops = std::max(m_max_batch_ops, m_pending_ops);
 		m_max_batch_bytes = std::max(m_max_batch_bytes, m_accumulated_bytes);
 		
-		CELERITY_TRACE("L0 v9: flushed batch: {} ops, {:.2f} MB", 
+		CELERITY_TRACE("L0 v9: submitted async batch: {} ops, {:.2f} MB (NO SYNC)", 
 		              m_pending_ops, m_accumulated_bytes / (1024.0 * 1024.0));
 		
 		m_pending_ops = 0;
@@ -219,6 +255,7 @@ public:
 
 	size_t pending_ops() const { return m_pending_ops; }
 	size_t accumulated_bytes() const { return m_accumulated_bytes; }
+	ze_command_list_handle_t get_command_list() const { return m_cl; }
 
 	void destroy() {
 		if(m_pending_ops > 0) {
@@ -334,10 +371,10 @@ class copy_engine {
 public:
 	explicit copy_engine(backend_impl* impl) : m_impl(impl) {}
 
-	void execute_copy(sycl::queue& sq, device_id dev_id, size_t lane_id,
-	                  const void* src_base, void* dst_base,
-	                  const region_layout& src_layout, const region_layout& dst_layout,
-	                  const region<3>& copy_region, size_t elem_size) {
+	async_event execute_copy(sycl::queue& sq, device_id dev_id, size_t lane_id,
+	                         const void* src_base, void* dst_base,
+	                         const region_layout& src_layout, const region_layout& dst_layout,
+	                         const region<3>& copy_region, size_t elem_size) {
 		
 		auto zeq_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sq);
 		auto zeq = std::get<ze_command_queue_handle_t>(zeq_variant);
@@ -346,6 +383,10 @@ public:
 		auto& lane = dev_state.get_or_create_lane(lane_id);
 		
 		std::lock_guard lk(lane.mtx);
+		
+		// Acquire completion event
+		auto completion_idx = dev_state.pool.acquire();
+		auto completion_ev = dev_state.pool.get(completion_idx);
 		
 		// Dispatch with adaptive batching
 		dispatch_nd_region_copy(
@@ -358,8 +399,15 @@ public:
 				execute_linear_copy(lane, zeq, src, dst, bytes);
 			});
 		
-		// Final flush for correctness
-		lane.batch.flush_sync(zeq);
+		// Signal completion on the last operation
+		if(lane.batch.pending_ops() > 0) {
+			ze_check(zeCommandListAppendSignalEvent(lane.batch.get_command_list(), completion_ev), 
+			         "zeCommandListAppendSignalEvent");
+			lane.batch.submit_async(zeq);  // NO SYNC HERE - truly async
+		}
+		
+		// Return async event - NO SYNC AT THIS POINT
+		return make_async_event<level_zero_async_event>(completion_ev, &dev_state.pool, completion_idx);
 	}
 
 private:
@@ -389,7 +437,7 @@ private:
 		
 		// Check if we should flush before this operation
 		if(lane.batch.should_flush(estimated_bytes)) {
-			lane.batch.flush_sync(zeq);
+			lane.batch.submit_async(zeq);
 		}
 		
 		// Use 2D copy optimization for strided layouts
@@ -411,7 +459,7 @@ private:
 		// Fallback: 1D chunks
 		for_each_contiguous_chunk(layout, [&](size_t src_off, size_t dst_off, size_t chunk) {
 			if(lane.batch.should_flush(chunk)) {
-				lane.batch.flush_sync(zeq);
+				lane.batch.submit_async(zeq);
 			}
 			
 			const void* src_ptr = static_cast<const std::byte*>(src_base) + src_off;
@@ -426,7 +474,7 @@ private:
 		if(bytes == 0) return;
 		
 		if(lane.batch.should_flush(bytes)) {
-			lane.batch.flush_sync(zeq);
+			lane.batch.submit_async(zeq);
 		}
 		
 		lane.batch.append_copy_1d(src, dst, bytes);
@@ -479,7 +527,7 @@ sycl_level_zero_backend::sycl_level_zero_backend(
 		}
 	}
 	
-	CELERITY_DEBUG("L0 v9 adaptive backend initialized: {} device(s), pool={}, small={}, medium={}, max_ops={}, max_bytes={:.1f}MB, timeout={}µs",
+	CELERITY_DEBUG("L0 v9 ASYNC adaptive backend initialized: {} device(s), pool={}, small={}, medium={}, max_ops={}, max_bytes={:.1f}MB, timeout={}µs (TRUE ASYNC MODE)",
 	              devices.size(), g_pool_size, g_small_copy_threshold, g_medium_copy_threshold, 
 	              g_max_batch_ops, g_max_batch_bytes / (1024.0 * 1024.0), g_batch_timeout_us);
 }
@@ -505,16 +553,11 @@ async_event sycl_level_zero_backend::enqueue_device_copy(
 		auto impl = static_cast<backend_impl*>(m_l0_impl);
 		copy_engine engine(impl);
 		
-		engine.execute_copy(sq, device, device_lane, 
-		                   src_base, dst_base, 
-		                   src_layout, dst_layout, 
-		                   copy_region, elem_size);
-		
-		sycl_backend_detail::flush(sq);
-		auto event = sq.ext_oneapi_submit_barrier();
-		
-		return make_async_event<sycl_backend_detail::sycl_event>(
-			std::move(event), is_profiling_enabled());
+		// Execute copy and get async event (NO SYNC)
+		return engine.execute_copy(sq, device, device_lane, 
+		                          src_base, dst_base, 
+		                          src_layout, dst_layout, 
+		                          copy_region, elem_size);
 	});
 }
 

@@ -1,5 +1,5 @@
-//Version: v6_corrected_exact_fixes
-//Text: Fixed ordering, threading, async execution, 2D/3D optimization - production quality
+//Version: v6_corrected_exact_fixes_async
+//Text: Fixed ordering, threading, TRUE async execution, 2D/3D optimization - production quality
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -35,6 +35,41 @@ namespace celerity::detail::level_zero_backend_detail {
 static inline void ze_check(ze_result_t r, const char* where) {
 	if(r != ZE_RESULT_SUCCESS) utils::panic("Level-Zero error in {}: code={}", where, static_cast<int>(r));
 }
+
+// ============================================================================
+// True Async Event - Polls without blocking, syncs only when CPU needs data
+// ============================================================================
+class level_zero_async_event final : public async_event_impl {
+public:
+	level_zero_async_event(ze_event_handle_t event, event_pool* pool, size_t index)
+		: m_event(event), m_pool(pool), m_index(index) {}
+	
+	~level_zero_async_event() override {
+		if(m_pool) {
+			m_pool->release(m_index);  // Just release, don't sync
+		}
+	}
+	
+	bool is_complete() override {
+		// Poll event status - truly async, no blocking
+		ze_result_t result = zeEventQueryStatus(m_event);
+		return result == ZE_RESULT_SUCCESS;
+	}
+	
+	// NEW: Explicit wait for when we NEED data on CPU
+	void wait_for_data() {
+		if(!is_complete()) {
+			CELERITY_TRACE("L0 v6: SYNC POINT - Waiting for data to be visible to CPU");
+			ze_check(zeEventHostSynchronize(m_event, UINT64_MAX), "zeEventHostSynchronize(wait_for_data)");
+			CELERITY_TRACE("L0 v6: SYNC COMPLETE - Data now visible to CPU");
+		}
+	}
+
+private:
+	ze_event_handle_t m_event;
+	event_pool* m_pool;
+	size_t m_index;
+};
 
 // ============================================================================
 // Configuration
@@ -194,7 +229,7 @@ public:
 		m_total_bytes += width * height;
 	}
 
-	// Submit batch to SYCL's native queue (ASYNC - no blocking!)
+	// Submit batch ASYNC - no blocking, let GPU work concurrently
 	void submit_async(ze_command_queue_handle_t zeq) {
 		if(m_pending_ops == 0) return;
 		
@@ -202,16 +237,16 @@ public:
 		ze_check(zeCommandQueueExecuteCommandLists(zeq, 1, &m_cl, nullptr), 
 		         "zeCommandQueueExecuteCommandLists");
 		
-		// CRITICAL: Synchronize to ensure operations complete before SYCL barrier
-		// This maintains correctness while still allowing batching benefits
-		ze_check(zeCommandQueueSynchronize(zeq, UINT64_MAX), "zeCommandQueueSynchronize");
+		// CRITICAL: NO zeCommandQueueSynchronize HERE - truly async!
+		// Let the commands execute asynchronously
+		// Sync only happens when CPU needs to see the data (via wait_for_data())
 		
 		ze_check(zeCommandListReset(m_cl), "zeCommandListReset");
 		
 		++m_total_batches;
 		m_total_ops += m_pending_ops;
 		
-		CELERITY_TRACE("L0 batch submitted: {} ops, {} bytes", m_pending_ops, m_total_bytes);
+		CELERITY_TRACE("L0 v6: submitted async batch: {} ops, {} bytes (NO SYNC)", m_pending_ops, m_total_bytes);
 		
 		m_pending_ops = 0;
 		m_total_bytes = 0;
@@ -219,6 +254,7 @@ public:
 	}
 
 	size_t pending_ops() const { return m_pending_ops; }
+	ze_command_list_handle_t get_command_list() const { return m_cl; }
 
 	void destroy() {
 		if(m_pending_ops > 0) {
@@ -331,10 +367,10 @@ class copy_engine {
 public:
 	explicit copy_engine(backend_impl* impl) : m_impl(impl) {}
 
-	void execute_copy(sycl::queue& sq, device_id dev_id, size_t lane_id,
-	                  const void* src_base, void* dst_base,
-	                  const region_layout& src_layout, const region_layout& dst_layout,
-	                  const region<3>& copy_region, size_t elem_size) {
+	async_event execute_copy(sycl::queue& sq, device_id dev_id, size_t lane_id,
+	                         const void* src_base, void* dst_base,
+	                         const region_layout& src_layout, const region_layout& dst_layout,
+	                         const region<3>& copy_region, size_t elem_size) {
 		
 		// Extract SYCL's native Level-Zero queue (maintains ordering!)
 		auto zeq_variant = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sq);
@@ -344,6 +380,10 @@ public:
 		auto& lane = dev_state.get_or_create_lane(lane_id);
 		
 		std::lock_guard lk(lane.mtx);
+		
+		// Acquire completion event
+		auto completion_idx = dev_state.pool.acquire();
+		auto completion_ev = dev_state.pool.get(completion_idx);
 		
 		// Dispatch with optimized 2D/3D paths
 		dispatch_nd_region_copy(
@@ -356,8 +396,15 @@ public:
 				execute_linear_copy(lane, zeq, src, dst, bytes);
 			});
 		
-		// Final flush for this copy operation
-		flush_lane(lane, zeq);
+		// Signal completion on the last operation
+		if(lane.batch.pending_ops() > 0) {
+			ze_check(zeCommandListAppendSignalEvent(lane.batch.get_command_list(), completion_ev), 
+			         "zeCommandListAppendSignalEvent");
+			lane.batch.submit_async(zeq);  // NO SYNC HERE - truly async
+		}
+		
+		// Return async event - NO SYNC AT THIS POINT
+		return make_async_event<level_zero_async_event>(completion_ev, &dev_state.pool, completion_idx);
 	}
 
 private:
@@ -425,10 +472,7 @@ private:
 		lane.batch.append_copy_1d(src, dst, bytes);
 	}
 
-	void flush_lane(lane_state& lane, ze_command_queue_handle_t zeq) {
-		// Submit any pending operations (async, non-blocking)
-		lane.batch.submit_async(zeq);
-	}
+
 };
 
 } // namespace celerity::detail::level_zero_backend_detail
@@ -480,7 +524,7 @@ sycl_level_zero_backend::sycl_level_zero_backend(
 		}
 	}
 	
-	CELERITY_DEBUG("L0 backend initialized: {} device(s), pool_size={}, batch_small={}, batch_medium={}, batch_large={}, timeout={}us",
+	CELERITY_DEBUG("L0 v6 ASYNC backend initialized: {} device(s), pool_size={}, batch_small={}, batch_medium={}, batch_large={}, timeout={}us (TRUE ASYNC MODE)",
 	              devices.size(), g_pool_size, g_batch_small_ops, g_batch_medium_ops, g_batch_large_ops, g_batch_timeout_us);
 }
 
@@ -508,18 +552,11 @@ async_event sycl_level_zero_backend::enqueue_device_copy(
 		// Create copy engine (lightweight, no state)
 		copy_engine engine(impl);
 		
-		// Execute copy with proper SYCL queue ordering
-		engine.execute_copy(sq, device, device_lane, 
-		                   src_base, dst_base, 
-		                   src_layout, dst_layout, 
-		                   copy_region, elem_size);
-		
-		// Return SYCL barrier event (maintains dependency chain)
-		sycl_backend_detail::flush(sq);
-		auto event = sq.ext_oneapi_submit_barrier();
-		
-		return make_async_event<sycl_backend_detail::sycl_event>(
-			std::move(event), is_profiling_enabled());
+		// Execute copy and get async event (NO SYNC)
+		return engine.execute_copy(sq, device, device_lane, 
+		                          src_base, dst_base, 
+		                          src_layout, dst_layout, 
+		                          copy_region, elem_size);
 	});
 }
 

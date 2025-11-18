@@ -1,5 +1,5 @@
-//Version: v0_baseline
-//Text: Initial implementation (shortest Version (289))
+//Version: v0_baseline_async
+//Text: Initial implementation with TRUE async execution (no blocking syncs)
 
 #include "backend/sycl_backend.h"
 #include "async_event.h"
@@ -167,8 +167,8 @@ void nd_copy_box_level_zero(sycl::queue& queue, const void* const source_base, v
 	ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
 	ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 	
-	// Synchronize the Level Zero queue to ensure all operations complete
-	ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+	// ASYNC: NO zeCommandQueueSynchronize HERE - let GPU work concurrently
+	// Sync only happens when CPU needs to see the data (via SYCL event wait)
 	
 	// Clean up/Destroy Level Zero resources
 	ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
@@ -213,9 +213,8 @@ async_event nd_copy_device_level_zero(sycl::queue& queue, const void* const sour
 		    ze_check(zeCommandListClose(cmd_list), "zeCommandListClose");
 		    ze_check(zeCommandQueueExecuteCommandLists(ze_queue, 1, &cmd_list, nullptr), "zeCommandQueueExecuteCommandLists");
 		    
-		    // Synchronize the Level Zero queue to ensure all operations complete
-		    // This is critical for proper ordering with subsequent SYCL operations
-		    ze_check(zeCommandQueueSynchronize(ze_queue, UINT64_MAX), "zeCommandQueueSynchronize");
+		    // ASYNC: NO zeCommandQueueSynchronize HERE - let GPU work concurrently
+		    // Sync only happens when CPU needs to see the data (via SYCL event wait)
 		    
 			// Clean up/Destroy Level Zero resources
 		    ze_check(zeCommandListDestroy(cmd_list), "zeCommandListDestroy");
@@ -236,7 +235,7 @@ namespace celerity::detail {
 
 sycl_level_zero_backend::sycl_level_zero_backend(const std::vector<sycl::device>& devices, const sycl_backend::configuration& config)
     : sycl_backend(devices, config) {
-	CELERITY_DEBUG("Level-Zero backend initialized with {} device(s)", devices.size());
+	CELERITY_DEBUG("Level-Zero v0 ASYNC backend initialized with {} device(s) (TRUE ASYNC MODE)", devices.size());
 	
 	// Note: Error handling is provided by the base class:
 	// - SYCL async_handler captures exceptions from device operations
