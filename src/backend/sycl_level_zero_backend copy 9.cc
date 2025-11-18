@@ -133,13 +133,19 @@ public:
 		return result == ZE_RESULT_SUCCESS;
 	}
 	
-	// NEW: Explicit wait for when we NEED data on CPU
-	void wait_for_data() {
+	// CRITICAL: Override wait_for_data for when CPU needs data visibility
+	void wait_for_data() override {
 		if(!is_complete()) {
 			CELERITY_TRACE("L0 v9: SYNC POINT - Waiting for data to be visible to CPU");
 			ze_check(zeEventHostSynchronize(m_event, UINT64_MAX), "zeEventHostSynchronize(wait_for_data)");
 			CELERITY_TRACE("L0 v9: SYNC COMPLETE - Data now visible to CPU");
 		}
+	}
+	
+	// Implement profiling support
+	std::optional<std::chrono::nanoseconds> get_native_execution_time() override {
+		// For now, return nullopt - Level Zero event timing can be added later
+		return std::nullopt;
 	}
 
 private:
@@ -170,6 +176,12 @@ public:
 	// Adaptive thresholds based on copy size
 	bool should_flush(size_t next_copy_bytes) {
 		if(m_pending_ops == 0) return false;
+		
+		// Safety: Always flush if we have too many pending ops (prevent deadlock)
+		if(m_pending_ops >= g_max_batch_ops * 2) {
+			CELERITY_WARN("L0 v9: Safety flush triggered - too many pending ops: {}", m_pending_ops);
+			return true;
+		}
 		
 		// Aggressive batching for small copies
 		if(next_copy_bytes < g_small_copy_threshold) {
@@ -229,6 +241,12 @@ public:
 	// Submit batch ASYNC - no blocking, let GPU work concurrently
 	void submit_async(ze_command_queue_handle_t zeq) {
 		if(m_pending_ops == 0) return;
+		
+		// Validation: ensure we have a valid queue
+		if(!zeq) {
+			CELERITY_ERROR("L0 v9: Invalid command queue handle in submit_async");
+			return;
+		}
 		
 		ze_check(zeCommandListClose(m_cl), "zeCommandListClose");
 		ze_check(zeCommandQueueExecuteCommandLists(zeq, 1, &m_cl, nullptr), 
