@@ -20,6 +20,7 @@ VERSIONS=(
     "v8_aggressive_batch"
     "v9_adaptive_coalescing"
     "v10_host_sync_optimized"
+    "v11_true_async"
 )
 
 
