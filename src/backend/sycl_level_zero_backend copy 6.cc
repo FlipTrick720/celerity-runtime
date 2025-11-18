@@ -36,6 +36,9 @@ static inline void ze_check(ze_result_t r, const char* where) {
 	if(r != ZE_RESULT_SUCCESS) utils::panic("Level-Zero error in {}: code={}", where, static_cast<int>(r));
 }
 
+// Forward declaration
+struct event_pool;
+
 // ============================================================================
 // True Async Event - Polls without blocking, syncs only when CPU needs data
 // ============================================================================
