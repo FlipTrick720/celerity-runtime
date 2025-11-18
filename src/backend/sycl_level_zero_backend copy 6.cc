@@ -36,44 +36,6 @@ static inline void ze_check(ze_result_t r, const char* where) {
 	if(r != ZE_RESULT_SUCCESS) utils::panic("Level-Zero error in {}: code={}", where, static_cast<int>(r));
 }
 
-// Forward declaration
-struct event_pool;
-
-// ============================================================================
-// True Async Event - Polls without blocking, syncs only when CPU needs data
-// ============================================================================
-class level_zero_async_event final : public async_event_impl {
-public:
-	level_zero_async_event(ze_event_handle_t event, event_pool* pool, size_t index)
-		: m_event(event), m_pool(pool), m_index(index) {}
-	
-	~level_zero_async_event() override {
-		if(m_pool) {
-			m_pool->release(m_index);  // Just release, don't sync
-		}
-	}
-	
-	bool is_complete() override {
-		// Poll event status - truly async, no blocking
-		ze_result_t result = zeEventQueryStatus(m_event);
-		return result == ZE_RESULT_SUCCESS;
-	}
-	
-	// NEW: Explicit wait for when we NEED data on CPU
-	void wait_for_data() {
-		if(!is_complete()) {
-			CELERITY_TRACE("L0 v6: SYNC POINT - Waiting for data to be visible to CPU");
-			ze_check(zeEventHostSynchronize(m_event, UINT64_MAX), "zeEventHostSynchronize(wait_for_data)");
-			CELERITY_TRACE("L0 v6: SYNC COMPLETE - Data now visible to CPU");
-		}
-	}
-
-private:
-	ze_event_handle_t m_event;
-	event_pool* m_pool;
-	size_t m_index;
-};
-
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -150,6 +112,41 @@ struct event_pool {
 		for(auto& e : events) if(e) zeEventDestroy(e);
 		if(pool) zeEventPoolDestroy(pool);
 	}
+};
+
+// ============================================================================
+// True Async Event - Polls without blocking, syncs only when CPU needs data
+// ============================================================================
+class level_zero_async_event final : public async_event_impl {
+public:
+	level_zero_async_event(ze_event_handle_t event, event_pool* pool, size_t index)
+		: m_event(event), m_pool(pool), m_index(index) {}
+	
+	~level_zero_async_event() override {
+		if(m_pool) {
+			m_pool->release(m_index);  // Just release, don't sync
+		}
+	}
+	
+	bool is_complete() override {
+		// Poll event status - truly async, no blocking
+		ze_result_t result = zeEventQueryStatus(m_event);
+		return result == ZE_RESULT_SUCCESS;
+	}
+	
+	// NEW: Explicit wait for when we NEED data on CPU
+	void wait_for_data() {
+		if(!is_complete()) {
+			CELERITY_TRACE("L0 v6: SYNC POINT - Waiting for data to be visible to CPU");
+			ze_check(zeEventHostSynchronize(m_event, UINT64_MAX), "zeEventHostSynchronize(wait_for_data)");
+			CELERITY_TRACE("L0 v6: SYNC COMPLETE - Data now visible to CPU");
+		}
+	}
+
+private:
+	ze_event_handle_t m_event;
+	event_pool* m_pool;
+	size_t m_index;
 };
 
 // ============================================================================
