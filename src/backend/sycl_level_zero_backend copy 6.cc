@@ -68,9 +68,12 @@ struct event_pool {
 	size_t peak_usage = 0;
 	size_t total_acquires = 0;
 
-	void init(ze_context_handle_t ctx, ze_device_handle_t dev, size_t count) {
+	void init(ze_context_handle_t ctx, ze_device_handle_t dev, size_t count, bool enable_profiling) {
 		ze_event_pool_desc_t d{ZE_STRUCTURE_TYPE_EVENT_POOL_DESC};
 		d.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
+		if(enable_profiling) {
+			d.flags |= ZE_EVENT_POOL_FLAG_KERNEL_TIMESTAMP;
+		}
 		d.count = static_cast<uint32_t>(count);
 		ze_check(zeEventPoolCreate(ctx, &d, 1, &dev, &pool), "zeEventPoolCreate");
 
@@ -115,12 +118,16 @@ struct event_pool {
 };
 
 // ============================================================================
-// True Async Event - Polls without blocking, syncs only when CPU needs data
+// True Async Event - Polls without blocking, optional host-side timing
 // ============================================================================
 class level_zero_async_event final : public async_event_impl {
 public:
-	level_zero_async_event(ze_event_handle_t event, event_pool* pool, size_t index)
-		: m_event(event), m_pool(pool), m_index(index) {}
+	level_zero_async_event(ze_event_handle_t event, event_pool* pool, size_t index, bool enable_profiling)
+		: m_event(event), m_pool(pool), m_index(index), m_enable_profiling(enable_profiling) {
+		if(m_enable_profiling) {
+			m_submit_time = std::chrono::steady_clock::now();
+		}
+	}
 	
 	~level_zero_async_event() override {
 		if(m_pool) {
@@ -130,48 +137,52 @@ public:
 	
 	bool is_complete() override {
 		// Poll event status - truly async, no blocking
-		ze_result_t result = zeEventQueryStatus(m_event);
-		return result == ZE_RESULT_SUCCESS;
+		const ze_result_t result = zeEventQueryStatus(m_event);
+		if(result == ZE_RESULT_SUCCESS) {
+			if(m_enable_profiling && !m_complete_time.has_value()) {
+				m_complete_time = std::chrono::steady_clock::now();
+			}
+			return true;
+		}
+		if(result == ZE_RESULT_NOT_READY) { return false; }
+		ze_check(result, "zeEventQueryStatus");
+		return false;
 	}
 	
-	// CRITICAL: Override wait_for_data for when CPU needs data visibility
+	// Helper for potential future CPU-side sync points without changing async semantics.
 	void wait_for_data() {
 		if(!is_complete()) {
 			CELERITY_TRACE("L0 v6: SYNC POINT - Waiting for data to be visible to CPU");
 			ze_check(zeEventHostSynchronize(m_event, UINT64_MAX), "zeEventHostSynchronize(wait_for_data)");
 			CELERITY_TRACE("L0 v6: SYNC COMPLETE - Data now visible to CPU");
+			if(m_enable_profiling && !m_complete_time.has_value()) {
+				m_complete_time = std::chrono::steady_clock::now();
+			}
 		}
 	}
 	
 	std::optional<std::chrono::nanoseconds> get_native_execution_time() override {
-	    // Check if this event supports timing (profiling enabled)
-	    // For Level Zero, we need to check if the event pool was created with profiling flags
-	    // For now, we'll use a simple approach: only return timing data if we can get valid timestamps
-	
-	    ze_event_handle_t event = m_event;
-	
-	    // Query Level Zero event timestamps
-	    ze_kernel_timestamp_result_t timestamp;
-	    ze_result_t result = zeEventQueryKernelTimestamp(event, &timestamp);
-	
-	    if(result == ZE_RESULT_SUCCESS) {
-	        uint64_t start_time = timestamp.global.kernelStart;
-	        uint64_t end_time = timestamp.global.kernelEnd;
-		
-	        if(end_time > start_time && start_time > 0) {
-	            // Valid timing data available - return it
-	            return std::chrono::nanoseconds(static_cast<int64_t>(end_time - start_time));
-	        }
-	    }
-	
-	    // No valid timing data available - return nullopt
-	    return std::nullopt;
+		// Respect backend profiling configuration: never report a time when disabled.
+		if(!m_enable_profiling) { return std::nullopt; }
+		if(!m_submit_time.has_value()) { return std::nullopt; }
+
+		// Ensure we have a completion timestamp; avoid blocking here.
+		if(!m_complete_time.has_value()) {
+			const ze_result_t result = zeEventQueryStatus(m_event);
+			if(result != ZE_RESULT_SUCCESS) { return std::nullopt; }
+			m_complete_time = std::chrono::steady_clock::now();
+		}
+
+		return std::chrono::duration_cast<std::chrono::nanoseconds>(*m_complete_time - *m_submit_time);
 	}
 
 private:
 	ze_event_handle_t m_event;
 	event_pool* m_pool;
 	size_t m_index;
+	bool m_enable_profiling = false;
+	std::optional<std::chrono::steady_clock::time_point> m_submit_time;
+	std::optional<std::chrono::steady_clock::time_point> m_complete_time;
 };
 
 // ============================================================================
@@ -340,10 +351,10 @@ struct device_state {
 	std::unordered_map<size_t, std::unique_ptr<lane_state>> lanes;
 	std::mutex lanes_mtx;
 	
-	void init(ze_context_handle_t ctx, ze_device_handle_t dev, size_t pool_size) {
+	void init(ze_context_handle_t ctx, ze_device_handle_t dev, size_t pool_size, bool enable_profiling) {
 		context = ctx;
 		device = dev;
-		pool.init(ctx, dev, pool_size);
+		pool.init(ctx, dev, pool_size, enable_profiling);
 	}
 	
 	lane_state& get_or_create_lane(size_t lane_id) {
@@ -372,13 +383,15 @@ struct device_state {
 // ============================================================================
 struct backend_impl {
 	std::vector<std::unique_ptr<device_state>> devices;
+	bool profiling_enabled = false;
 	
-	void init(const std::vector<sycl::device>& sycl_devices, ze_context_handle_t ctx) {
+	void init(const std::vector<sycl::device>& sycl_devices, ze_context_handle_t ctx, bool enable_profiling) {
+		profiling_enabled = enable_profiling;
 		devices.reserve(sycl_devices.size());
 		for(size_t i = 0; i < sycl_devices.size(); ++i) {
 			auto zedev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sycl_devices[i]);
 			auto ds = std::make_unique<device_state>();
-			ds->init(ctx, zedev, g_pool_size);
+			ds->init(ctx, zedev, g_pool_size, profiling_enabled);
 			devices.push_back(std::move(ds));
 		}
 	}
@@ -435,7 +448,7 @@ public:
 		}
 		
 		// Return async event - NO SYNC AT THIS POINT
-		return make_async_event<level_zero_async_event>(completion_ev, &dev_state.pool, completion_idx);
+		return make_async_event<level_zero_async_event>(completion_ev, &dev_state.pool, completion_idx, m_impl->profiling_enabled);
 	}
 
 private:
@@ -526,7 +539,7 @@ sycl_level_zero_backend::sycl_level_zero_backend(
 	auto ctx = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
 		devices[0].get_platform().ext_oneapi_get_default_context());
 	
-	impl->init(devices, ctx);
+	impl->init(devices, ctx, is_profiling_enabled());
 	
 	// Store as opaque pointer (to avoid exposing internal types in header)
 	m_l0_impl = impl.release();
