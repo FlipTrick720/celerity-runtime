@@ -106,11 +106,12 @@ def plot_version_comparison(versions_data, output_dir):
                            label=version_tag)
             
             ax.set_xscale('log', base=2)
+            ax.set_yscale('log')
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Bandwidth (GiB/s)')
             pinned_label = 'Pinned' if pinned == 'yes' else 'Pageable'
             ax.set_title(f'{mode.capitalize()} + {pinned_label}')
-            ax.grid(True, alpha=0.3)
+            ax.grid(True, alpha=0.3, which='both')
             ax.legend()
         
         plt.tight_layout()
@@ -160,10 +161,11 @@ def plot_mode_comparison(versions_data, output_dir):
                                markersize=4, label=label, alpha=0.8)
         
         ax.set_xscale('log', base=2)
+        ax.set_yscale('log')
         ax.set_xlabel('Transfer Size (KiB)')
         ax.set_ylabel('Bandwidth (GiB/s)')
         ax.set_title(f'{op} Performance')
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.3, which='both')
         ax.legend(fontsize=8, loc='best')
     
     plt.tight_layout()

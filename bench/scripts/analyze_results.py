@@ -165,10 +165,11 @@ def plot_bandwidth_comparison(df, output_dir, metadata=None):
                            label=f'{backend.upper()}')
             
             ax.set_xscale('log', base=2)
+            ax.set_yscale('log')
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Bandwidth (GiB/s)')
             ax.set_title(title)
-            ax.grid(True, alpha=0.3)
+            ax.grid(True, alpha=0.3, which='both')
             ax.legend()
         
         plt.tight_layout()
@@ -215,10 +216,11 @@ def plot_mode_comparison(df, output_dir):
                                markersize=5, label=label, alpha=0.8)
             
             ax.set_xscale('log', base=2)
+            ax.set_yscale('log')
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Bandwidth (GiB/s)')
             ax.set_title(f'{op} Performance')
-            ax.grid(True, alpha=0.3)
+            ax.grid(True, alpha=0.3, which='both')
             ax.legend(fontsize=9)
         
         plt.tight_layout()
