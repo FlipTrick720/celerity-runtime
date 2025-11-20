@@ -70,8 +70,8 @@ for version in "${VERSIONS[@]}"; do
         latest_dir="${result_dirs[-1]}"  # Get last (most recent) directory
         python3 scripts/analyze_results.py \
             "${latest_dir}" \
-            --output "plots_${version}"
-        echo "  ✓ Plots saved to: bench/plots_${version}/"
+            --output "individual_plots/plots_${version}"
+        echo "  ✓ Plots saved to: bench/individual_plots/plots_${version}/"
         echo ""
     else
         echo "  ⚠️  No results found for ${version}"

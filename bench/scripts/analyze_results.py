@@ -446,12 +446,30 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze Celerity backend benchmark results')
     parser.add_argument('results_dir', nargs='?', default='results',
                        help='Directory containing benchmark CSV files (default: results)')
-    parser.add_argument('--output', '-o', default='plots',
-                       help='Output directory for plots (default: plots)')
+    parser.add_argument('--output', '-o', default=None,
+                       help='Output directory for plots (default: auto-detect from results_dir)')
     parser.add_argument('--compare', action='store_true',
                        help='Compare multiple backend versions (expects multiple result dirs)')
     
     args = parser.parse_args()
+    
+    # Auto-detect output directory based on results_dir
+    if args.output is None:
+        # Extract version from results directory name
+        # e.g., results/results_v10_host_sync_optimized_20251119 -> plots_v10_host_sync_optimized
+        results_path = Path(args.results_dir)
+        dir_name = results_path.name
+        
+        if dir_name.startswith('results_'):
+            # Remove 'results_' prefix and timestamp suffix
+            version_part = dir_name[8:]  # Remove 'results_'
+            # Remove timestamp (last part after underscore that's all digits)
+            parts = version_part.split('_')
+            if parts and parts[-1].isdigit() and len(parts[-1]) >= 8:
+                version_part = '_'.join(parts[:-1])
+            args.output = f'individual_plots/plots_{version_part}'
+        else:
+            args.output = 'individual_plots/plots'
     
     # Load data
     print(f"Loading CSV files from: {args.results_dir}")
