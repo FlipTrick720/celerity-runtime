@@ -11,7 +11,7 @@ struct Row {
 	std::string op; size_t bytes; int reps;
 	double avg_us; double gib_s; bool batch; bool pinned;
 };
-
+// y sycle q
 static Row run_one(sycl::queue& q, const Args& args,
 	const char* op, void* hsrc, void* hdst, void* dsrc, void* ddst, size_t bytes) {
 	
