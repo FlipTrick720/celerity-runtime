@@ -145,6 +145,21 @@ run_backend level_zero memcpy_linear "[batch pageable]" "--batch --no-pin" "l0_m
 
 run_backend level_zero event_overhead "[default]" "" "l0_event_overhead_${date_tag}.csv"
 
+# Level Zero Native - Full Matrix (if available)
+if [[ -f "${build_dir}/memcpy_linear_l0" ]]; then
+	echo ""
+	echo "=== Level Zero Native Benchmark ==="
+	run_backend level_zero memcpy_linear_l0 "[L0 native sync pinned]"   ""                 "l0_native_memcpy_sync_pinned_${date_tag}.csv"
+	run_backend level_zero memcpy_linear_l0 "[L0 native sync pageable]" "--no-pin"         "l0_native_memcpy_sync_pageable_${date_tag}.csv"
+	run_backend level_zero memcpy_linear_l0 "[L0 native batch pinned]"  "--batch"          "l0_native_memcpy_batch_pinned_${date_tag}.csv"
+	run_backend level_zero memcpy_linear_l0 "[L0 native batch pageable]" "--batch --no-pin" "l0_native_memcpy_batch_pageable_${date_tag}.csv"
+else
+	echo ""
+	echo "=== Level Zero Native Benchmark ==="
+	echo "⚠️  memcpy_linear_l0 not found, skipping Level Zero native tests"
+	echo "   To build: cd bench && cmake -S . -B build && cmake --build build"
+fi
+
 # CUDA - Full Matrix (optional)
 if [[ "${ENABLE_CUDA}" == "yes" ]] || [[ "${ENABLE_CUDA}" == "auto" ]]; then
 	echo ""

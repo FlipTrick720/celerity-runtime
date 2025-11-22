@@ -57,4 +57,10 @@ echo "Build Complete!"
 echo "========================================="
 echo "Executables:"
 ls -lh "${BUILD_DIR}"/memcpy_linear "${BUILD_DIR}"/event_overhead
+if [[ -f "${BUILD_DIR}/memcpy_linear_l0" ]]; then
+    ls -lh "${BUILD_DIR}"/memcpy_linear_l0
+    echo "✓ Level Zero native benchmark built"
+else
+    echo "⚠️  Level Zero native benchmark not built (optional)"
+fi
 echo ""
