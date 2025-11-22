@@ -45,3 +45,10 @@ add_executable(event_overhead micro/event_overhead.cpp)
 target_include_directories(event_overhead PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(event_overhead PRIVATE ${SYCL_FLAGS} ${INTEL_GPU_FLAGS})
 target_link_options(event_overhead PRIVATE ${SYCL_FLAGS} ${INTEL_GPU_FLAGS})
+
+# Level Zero native backend benchmark
+add_executable(memcpy_linear_l0 micro/memcpy_linear_l0.cpp)
+target_include_directories(memcpy_linear_l0 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(memcpy_linear_l0 PRIVATE ${SYCL_FLAGS} ${INTEL_GPU_FLAGS})
+target_link_options(memcpy_linear_l0 PRIVATE ${SYCL_FLAGS} ${INTEL_GPU_FLAGS})
+target_link_libraries(memcpy_linear_l0 PRIVATE ze_loader)
