@@ -238,26 +238,44 @@ def plot_normalized_performance(df, output_dir):
     # Get baseline performance
     baseline_version = 'v0_baseline'
     
+    # Determine available implementations
+    available_impls = df['implementation'].unique()
+    impl_map = {}
+    if 'L0 Backend' in available_impls:
+        impl_map['L0 Backend'] = 'L0 Backend'
+    if 'L0 Native' in available_impls:
+        impl_map['L0 Native'] = 'L0 Native'
+    if 'Generic SYCL' in available_impls:
+        impl_map['Generic SYCL'] = 'Generic SYCL'
+    
+    if len(impl_map) < 2:
+        print("  Not enough implementations for normalized performance plots")
+        return
+    
     operations = ['D2D', 'H2D', 'D2H']
     
     for op in operations:
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        fig, axes = plt.subplots(1, len(impl_map), figsize=(8 * len(impl_map), 6))
+        if len(impl_map) == 1:
+            axes = [axes]
         fig.suptitle(f'{op} Performance Normalized to Baseline', 
                     fontsize=16, fontweight='bold')
         
-        for impl_idx, impl in enumerate(['SYCL', 'Native']):
+        for impl_idx, (impl_name, impl_label) in enumerate(impl_map.items()):
             ax = axes[impl_idx]
             
             # Get baseline performance
             baseline_data = df[
                 (df['version'] == baseline_version) &
-                (df['implementation'] == impl) &
+                (df['implementation'] == impl_name) &
                 (df['op'] == op) &
                 (df['mode'] == 'batch') &
                 (df['pinned'] == 'yes')
             ]
             
             if baseline_data.empty:
+                ax.text(0.5, 0.5, f'No baseline data for {impl_label}',
+                       ha='center', va='center', transform=ax.transAxes)
                 continue
             
             baseline_peak = baseline_data['gib_per_s'].max()
@@ -270,7 +288,7 @@ def plot_normalized_performance(df, output_dir):
             for version in versions:
                 version_data = df[
                     (df['version'] == version) &
-                    (df['implementation'] == impl) &
+                    (df['implementation'] == impl_name) &
                     (df['op'] == op) &
                     (df['mode'] == 'batch') &
                     (df['pinned'] == 'yes')
@@ -281,6 +299,11 @@ def plot_normalized_performance(df, output_dir):
                     normalized = (peak / baseline_peak) * 100
                     normalized_perfs.append(normalized)
                     labels.append(version.replace('_', '\n'))
+            
+            if not normalized_perfs:
+                ax.text(0.5, 0.5, f'No data for {impl_label}',
+                       ha='center', va='center', transform=ax.transAxes)
+                continue
             
             # Create bar chart
             colors = ['green' if x >= 100 else 'orange' for x in normalized_perfs]
@@ -298,7 +321,7 @@ def plot_normalized_performance(df, output_dir):
                       label='Baseline', alpha=0.7)
             ax.set_xlabel('Backend Version', fontsize=10)
             ax.set_ylabel('Performance (% of Baseline)', fontsize=10)
-            ax.set_title(f'{impl} Implementation', fontsize=12)
+            ax.set_title(f'{impl_label}', fontsize=12)
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
             ax.grid(True, alpha=0.3, axis='y')
@@ -314,6 +337,13 @@ def plot_best_variant_summary(df, output_dir):
     """Create summary showing which variant performs best for each configuration."""
     output_dir = Path(output_dir)
     
+    # Get available implementations
+    available_impls = sorted(df['implementation'].unique())
+    
+    if len(available_impls) < 2:
+        print("  Not enough implementations for best variant summary")
+        return
+    
     operations = ['D2D', 'H2D', 'D2H']
     modes = [('sync', 'yes', 'Sync+Pin'), ('batch', 'yes', 'Batch+Pin')]
     
@@ -328,7 +358,7 @@ def plot_best_variant_summary(df, output_dir):
             # Find best variant for each implementation
             best_results = []
             
-            for impl in ['SYCL', 'Native']:
+            for impl in available_impls:
                 versions = df['version'].unique()
                 best_perf = 0
                 best_version = None
@@ -361,18 +391,24 @@ def plot_best_variant_summary(df, output_dir):
                 perfs = [r['perf'] for r in best_results]
                 versions = [r['version'].replace('_', '\n') for r in best_results]
                 
-                bars = ax.bar(impls, perfs, color=['steelblue', 'coral'], alpha=0.7)
+                # Use different colors for different implementations
+                colors = ['steelblue', 'coral', 'lightgreen'][:len(impls)]
+                bars = ax.bar(impls, perfs, color=colors, alpha=0.7)
                 
                 # Add labels
                 for bar, perf, version in zip(bars, perfs, versions):
                     height = bar.get_height()
                     ax.text(bar.get_x() + bar.get_width()/2., height,
                            f'{perf:.2f} GiB/s\n{version}',
-                           ha='center', va='bottom', fontsize=9, fontweight='bold')
+                           ha='center', va='bottom', fontsize=8, fontweight='bold')
                 
                 ax.set_ylabel('Peak Bandwidth (GiB/s)', fontsize=10)
                 ax.set_title(f'{op} - {mode_label}', fontsize=11)
+                ax.set_xticklabels(impls, rotation=15, ha='right', fontsize=9)
                 ax.grid(True, alpha=0.3, axis='y')
+            else:
+                ax.text(0.5, 0.5, 'No data', ha='center', va='center', 
+                       transform=ax.transAxes)
     
     plt.tight_layout()
     output_file = output_dir / 'best_variant_summary.png'
