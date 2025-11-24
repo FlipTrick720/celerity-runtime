@@ -112,7 +112,7 @@ fi
 
 # Run reference benchmarks
 cd bench
-if ./scripts/run_reference_benchmarks.sh > "../$RESULTS_DIR/reference_bench.log" 2>&1; then
+if ./scripts/run_reference_benchmarks.sh 2>&1 | tee "../$RESULTS_DIR/reference_bench.log"; then
     echo "✓ Reference benchmarks complete"
     # Find the reference directory that was just created
     REFERENCE_DIR="$PWD/$(ls -td reference_results_* 2>/dev/null | head -1)"
@@ -126,8 +126,14 @@ if ./scripts/run_reference_benchmarks.sh > "../$RESULTS_DIR/reference_bench.log"
         ls -lh "$REFERENCE_DIR"/*.csv 2>/dev/null | awk '{print "     " $9 " (" $5 ")"}'
     fi
 else
-    echo "⚠️  Reference benchmarks failed - check $RESULTS_DIR/reference_bench.log"
-    echo "   Will continue without reference benchmarks"
+    echo ""
+    echo "⚠️  Reference benchmarks failed - check output above and $RESULTS_DIR/reference_bench.log"
+    echo "   Common issues:"
+    echo "   - oneAPI environment not loaded"
+    echo "   - Benchmarks not built"
+    echo "   - Level Zero drivers not installed"
+    echo ""
+    echo "   Will continue without reference benchmarks (L0 Backend only)"
     REFERENCE_DIR=""
 fi
 cd ..

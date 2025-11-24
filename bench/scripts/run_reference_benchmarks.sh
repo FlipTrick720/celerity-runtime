@@ -9,6 +9,23 @@ echo "Running Reference Benchmarks"
 echo "========================================="
 echo ""
 
+# Ensure oneAPI is loaded (needed to run SYCL executables)
+if [ -z "${ONEAPI_ROOT:-}" ]; then
+    echo "Loading oneAPI environment..."
+    if [ -f /opt/intel/oneapi/setvars.sh ]; then
+        set +u  # Temporarily disable -u for oneAPI script
+        source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1
+        set -u
+        echo "✓ oneAPI loaded"
+    else
+        echo "⚠️  Warning: oneAPI not found at /opt/intel/oneapi/setvars.sh"
+        echo "   Benchmarks may fail if SYCL libraries are not in LD_LIBRARY_PATH"
+    fi
+else
+    echo "✓ oneAPI already loaded"
+fi
+echo ""
+
 # Check if we're in bench directory
 if [[ ! -f "CMakeLists.txt" ]]; then
     if [[ -d "bench" ]]; then
@@ -124,8 +141,21 @@ echo "========================================="
 echo ""
 echo "Results saved to: $REF_DIR"
 echo ""
-echo "Files:"
-ls -lh "$REF_DIR"/*.csv
-echo ""
-echo "These reference results can be copied to each variant directory"
-echo "for consistent comparison across all backend variants."
+
+# Check if any CSV files were created
+csv_count=$(ls -1 "$REF_DIR"/*.csv 2>/dev/null | wc -l)
+if [ "$csv_count" -gt 0 ]; then
+    echo "Files:"
+    ls -lh "$REF_DIR"/*.csv
+    echo ""
+    echo "These reference results can be copied to each variant directory"
+    echo "for consistent comparison across all backend variants."
+else
+    echo "⚠️  WARNING: No CSV files were created!"
+    echo "   Reference benchmarks failed to run properly."
+    echo "   Check that:"
+    echo "   - oneAPI environment is loaded"
+    echo "   - Benchmarks are built (./build_bench.sh)"
+    echo "   - Level Zero drivers are installed"
+    exit 1
+fi
