@@ -59,19 +59,21 @@ def load_version_data(result_dir):
                 backend_val = df['backend'].iloc[0] if len(df) > 0 else ''
                 if 'native' in backend_val.lower():
                     df['implementation'] = 'L0 Native'
-                elif 'cuda' in backend_val.lower():
-                    df['implementation'] = 'CUDA'
+                elif 'level_zero' in backend_val.lower():
+                    df['implementation'] = 'L0 Backend'
+                elif 'opencl' in backend_val.lower() or 'generic' in backend_val.lower():
+                    df['implementation'] = 'Generic SYCL'
                 else:
-                    df['implementation'] = 'SYCL'
+                    df['implementation'] = 'L0 Backend'
             else:
                 # Fallback to filename detection
                 filename = csv_file.name
                 if 'l0_native_' in filename or 'native_' in filename:
                     df['implementation'] = 'L0 Native'
-                elif 'cuda_' in filename:
-                    df['implementation'] = 'CUDA'
+                elif 'generic_' in filename or 'opencl_' in filename:
+                    df['implementation'] = 'Generic SYCL'
                 else:
-                    df['implementation'] = 'SYCL'
+                    df['implementation'] = 'L0 Backend'
             
             dfs.append(df)
         except Exception as e:
@@ -195,18 +197,28 @@ def plot_mode_comparison(versions_data, output_dir):
     plt.close()
 
 def plot_sycl_vs_native_comparison(versions_data, output_dir):
-    """Plot SYCL vs Native comparison across all versions."""
+    """Plot implementation comparison across all versions."""
     output_dir = Path(output_dir)
     
     all_data = pd.concat([df for df, _ in versions_data], ignore_index=True)
     memcpy_df = all_data[all_data['bench'].str.contains('memcpy', case=False, na=False)].copy()
     memcpy_df['size_kib'] = memcpy_df['bytes'] / 1024
     
+    # Get available implementations
+    implementations = memcpy_df['implementation'].unique()
+    
     operations = ['D2D', 'H2D', 'D2H']
+    
+    # Define styles for each implementation
+    impl_styles = {
+        'Generic SYCL': {'linestyle': ':', 'linewidth': 1.5, 'alpha': 0.6},
+        'L0 Backend': {'linestyle': '--', 'linewidth': 1.8, 'alpha': 0.75},
+        'L0 Native': {'linestyle': '-', 'linewidth': 2.0, 'alpha': 0.9}
+    }
     
     for op in operations:
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle(f'{op}: SYCL vs Level Zero Native (All Versions)', fontsize=16, fontweight='bold')
+        fig.suptitle(f'{op}: Implementation Comparison (All Versions)', fontsize=16, fontweight='bold')
         
         modes = [
             ('sync', 'yes', 'Sync + Pinned'),
@@ -218,11 +230,14 @@ def plot_sycl_vs_native_comparison(versions_data, output_dir):
         for idx, (mode, pinned, title) in enumerate(modes):
             ax = axes[idx // 2, idx % 2]
             
-            # Plot each version's SYCL and Native
+            # Plot each version's implementations
             for _, version_tag in versions_data:
                 version_data = memcpy_df[memcpy_df['backend_version'] == version_tag]
                 
-                for impl in ['SYCL', 'L0 Native']:
+                for impl in ['Generic SYCL', 'L0 Backend', 'L0 Native']:
+                    if impl not in implementations:
+                        continue
+                        
                     data = version_data[
                         (version_data['op'] == op) &
                         (version_data['implementation'] == impl) &
@@ -232,12 +247,10 @@ def plot_sycl_vs_native_comparison(versions_data, output_dir):
                     
                     if not data.empty:
                         grouped = data.groupby('size_kib')['gib_per_s'].median().reset_index()
-                        linestyle = '-' if impl == 'L0 Native' else '--'
-                        linewidth = 2.0 if impl == 'L0 Native' else 1.5
+                        style = impl_styles.get(impl, {'linestyle': '-', 'linewidth': 1.5, 'alpha': 0.8})
                         label = f"{version_tag} ({impl})"
                         ax.plot(grouped['size_kib'], grouped['gib_per_s'],
-                               marker='o', linestyle=linestyle, linewidth=linewidth,
-                               markersize=4, label=label, alpha=0.8)
+                               marker='o', markersize=3, label=label, **style)
             
             ax.set_xscale('log', base=2)
             ax.set_yscale('log')
@@ -245,10 +258,10 @@ def plot_sycl_vs_native_comparison(versions_data, output_dir):
             ax.set_ylabel('Bandwidth (GiB/s)')
             ax.set_title(title)
             ax.grid(True, alpha=0.3, which='both')
-            ax.legend(fontsize=7, loc='best')
+            ax.legend(fontsize=6, loc='best', ncol=2)
         
         plt.tight_layout()
-        output_file = output_dir / f'sycl_vs_native_all_versions_{op.lower()}.png'
+        output_file = output_dir / f'implementation_comparison_all_versions_{op.lower()}.png'
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"Saved: {output_file}")
         plt.close()
@@ -350,12 +363,13 @@ def main():
     plot_version_comparison(versions_data, output_dir)
     plot_mode_comparison(versions_data, output_dir)
     
-    # Check if we have SYCL vs Native data to compare
+    # Check if we have multiple implementations to compare
     all_data = pd.concat([df for df, _ in versions_data], ignore_index=True)
     if 'implementation' in all_data.columns:
         implementations = all_data['implementation'].unique()
-        if 'SYCL' in implementations and 'L0 Native' in implementations:
-            print("\n=== Generating SYCL vs Native Comparison ===")
+        if len(implementations) > 1:
+            print("\n=== Generating Implementation Comparison ===")
+            print(f"Comparing: {', '.join(implementations)}")
             plot_sycl_vs_native_comparison(versions_data, output_dir)
     
     # Generate comparison table

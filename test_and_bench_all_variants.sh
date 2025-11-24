@@ -83,6 +83,63 @@ VARIANT_HEADERS[variant9]="include/backend/sycl_backend copy 2.h"
 VARIANT_HEADERS[variant10]="include/backend/sycl_backend copy 2.h"
 VARIANT_HEADERS[variant11]="include/backend/sycl_backend copy 2.h"
 
+# =========================
+# RUN REFERENCE BENCHMARKS (ONCE)
+# =========================
+# These are hardware-dependent, not variant-dependent
+# Run L0 Native and Generic SYCL once, then copy to all variants
+
+REFERENCE_DIR=""
+
+echo ""
+echo "========================================="
+echo "Running Reference Benchmarks"
+echo "========================================="
+echo ""
+echo "These benchmarks measure hardware capability and baseline performance."
+echo "They will be run once and copied to all variant results."
+echo ""
+
+# Build benchmarks first
+echo "Building benchmarks..."
+if (cd bench && ./build_bench.sh) > "$RESULTS_DIR/bench_build.log" 2>&1; then
+    echo "✓ Benchmark build successful"
+else
+    echo "✗ Benchmark build failed - check $RESULTS_DIR/bench_build.log"
+    echo "Cannot continue without benchmarks"
+    exit 1
+fi
+
+# Run reference benchmarks
+cd bench
+if ./scripts/run_reference_benchmarks.sh > "../$RESULTS_DIR/reference_bench.log" 2>&1; then
+    echo "✓ Reference benchmarks complete"
+    # Find the reference directory that was just created
+    REFERENCE_DIR="$PWD/$(ls -td reference_results_* 2>/dev/null | head -1)"
+    if [[ -z "$REFERENCE_DIR" ]] || [[ ! -d "$REFERENCE_DIR" ]]; then
+        echo "⚠️  Warning: Could not find reference results directory"
+        echo "   Will continue without reference benchmarks"
+        REFERENCE_DIR=""
+    else
+        echo "   Reference results: $REFERENCE_DIR"
+        echo "   Files:"
+        ls -lh "$REFERENCE_DIR"/*.csv 2>/dev/null | awk '{print "     " $9 " (" $5 ")"}'
+    fi
+else
+    echo "⚠️  Reference benchmarks failed - check $RESULTS_DIR/reference_bench.log"
+    echo "   Will continue without reference benchmarks"
+    REFERENCE_DIR=""
+fi
+cd ..
+
+echo ""
+echo "Cool down (30s)..."
+sleep 30
+
+# =========================
+# TEST EACH VARIANT
+# =========================
+
 # Test each variant
 for variant in baseline variant6 variant9 variant1 variant2 variant3 variant4 variant5 variant7 variant8 variant10 variant11; do
 
@@ -120,19 +177,6 @@ for variant in baseline variant6 variant9 variant1 variant2 variant3 variant4 va
         continue
     fi
     
-    # Build benchmarks (only once, first variant)
-    if [[ "$variant" == "baseline" ]]; then
-        echo "Building benchmarks..."
-        if (cd bench && ./build_bench.sh) > "$VARIANT_DIR/bench_build.log" 2>&1; then
-            echo "✓ Benchmark build successful"
-        else
-            echo "✗ Benchmark build failed - check $VARIANT_DIR/bench_build.log"
-            continue
-        fi
-    else
-        echo "✓ Using existing benchmark build"
-    fi
-    
     # Run tests with clean environment (no CELERITY_L0_* vars)
     echo "Running tests with clean environment (no CELERITY_L0_* vars)..."
     unset_l0_env
@@ -164,12 +208,28 @@ for variant in baseline variant6 variant9 variant1 variant2 variant3 variant4 va
     
     # Run benchmarks and save to variant-specific directory in bench/results/
     cd bench
-    if ENABLE_CUDA=no taskset -c 0-15 ./scripts/run_matrix.sh results > "../$VARIANT_DIR/bench.log" 2>&1; then
+    # Skip reference benchmarks in run_matrix.sh (we already ran them)
+    if ENABLE_CUDA=no SKIP_REFERENCE=yes taskset -c 0-15 ./scripts/run_matrix.sh results > "../$VARIANT_DIR/bench.log" 2>&1; then
         echo "✓ Benchmarks complete"        
     else
         echo "✗ Benchmarks failed - check $VARIANT_DIR/bench.log"
     fi
     cd ..
+    
+    # Copy reference benchmarks to variant results
+    if [[ -n "$REFERENCE_DIR" ]] && [[ -d "$REFERENCE_DIR" ]]; then
+        echo "Copying reference benchmarks to variant results..."
+        # Find the variant's result directory
+        VARIANT_RESULT_DIR=$(find "$VARIANT_DIR" -type d -name "results_*" 2>/dev/null | head -1)
+        if [[ -n "$VARIANT_RESULT_DIR" ]] && [[ -d "$VARIANT_RESULT_DIR" ]]; then
+            # Copy all reference CSV files
+            cp "$REFERENCE_DIR"/*.csv "$VARIANT_RESULT_DIR/" 2>/dev/null && \
+                echo "✓ Reference results copied" || \
+                echo "⚠️  Could not copy reference results"
+        else
+            echo "⚠️  Could not find variant result directory"
+        fi
+    fi
        
     echo "$variant complete!"
 done

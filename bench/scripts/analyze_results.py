@@ -66,19 +66,22 @@ def load_all_csvs(results_dir):
                 backend_val = df['backend'].iloc[0] if len(df) > 0 else ''
                 if 'native' in backend_val.lower():
                     df['implementation'] = 'L0 Native'
-                elif 'cuda' in backend_val.lower():
-                    df['implementation'] = 'CUDA'
+                elif 'level_zero' in backend_val.lower():
+                    df['implementation'] = 'L0 Backend'
+                elif 'opencl' in backend_val.lower() or 'generic' in backend_val.lower():
+                    df['implementation'] = 'Generic SYCL'
                 else:
-                    df['implementation'] = 'SYCL'
+                    # Default to L0 Backend for level_zero
+                    df['implementation'] = 'L0 Backend'
             else:
                 # Fallback to filename detection
                 filename = csv_file.name
                 if 'l0_native_' in filename or 'native_' in filename:
                     df['implementation'] = 'L0 Native'
-                elif 'cuda_' in filename:
-                    df['implementation'] = 'CUDA'
+                elif 'generic_' in filename or 'opencl_' in filename:
+                    df['implementation'] = 'Generic SYCL'
                 else:
-                    df['implementation'] = 'SYCL'
+                    df['implementation'] = 'L0 Backend'
             
             # Add backend version info if available from metadata
             if metadata and 'Backend Tag' in metadata:
@@ -160,11 +163,16 @@ def plot_sycl_vs_native(df, output_dir, metadata=None):
     implementations = memcpy_df['implementation'].unique()
     print(f"  Implementations found: {', '.join(implementations)}")
     
-    if 'SYCL' not in implementations or 'L0 Native' not in implementations:
-        print(f"  Missing SYCL or L0 Native data (found: {', '.join(implementations)})")
+    # Check what we have
+    has_l0_backend = 'L0 Backend' in implementations
+    has_l0_native = 'L0 Native' in implementations
+    has_generic = 'Generic SYCL' in implementations
+    
+    if not (has_l0_backend or has_l0_native):
+        print(f"  No L0 Backend or L0 Native data found")
         return
     
-    print(f"  Generating SYCL vs Native comparison plots...")
+    print(f"  Generating implementation comparison plots...")
     
     memcpy_df['size_kib'] = memcpy_df['bytes'] / 1024
     
@@ -176,7 +184,7 @@ def plot_sycl_vs_native(df, output_dir, metadata=None):
     
     for op in operations:
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle(f'{op}: SYCL vs Level Zero Native{version_str}', fontsize=16, fontweight='bold')
+        fig.suptitle(f'{op}: Implementation Comparison{version_str}', fontsize=16, fontweight='bold')
         
         modes = [
             ('sync', 'yes', 'Sync + Pinned'),
@@ -188,7 +196,17 @@ def plot_sycl_vs_native(df, output_dir, metadata=None):
         for idx, (mode, pinned, title) in enumerate(modes):
             ax = axes[idx // 2, idx % 2]
             
-            for impl in ['SYCL', 'L0 Native']:
+            # Plot all available implementations
+            impl_styles = {
+                'Generic SYCL': {'linestyle': ':', 'linewidth': 1.5, 'marker': 's', 'alpha': 0.7},
+                'L0 Backend': {'linestyle': '--', 'linewidth': 2.0, 'marker': 'o', 'alpha': 0.85},
+                'L0 Native': {'linestyle': '-', 'linewidth': 2.5, 'marker': 'o', 'alpha': 0.95}
+            }
+            
+            for impl in ['Generic SYCL', 'L0 Backend', 'L0 Native']:
+                if impl not in implementations:
+                    continue
+                    
                 data = memcpy_df[
                     (memcpy_df['op'] == op) &
                     (memcpy_df['implementation'] == impl) &
@@ -198,11 +216,9 @@ def plot_sycl_vs_native(df, output_dir, metadata=None):
                 
                 if not data.empty:
                     grouped = data.groupby('size_kib')['gib_per_s'].median().reset_index()
-                    linestyle = '-' if impl == 'L0 Native' else '--'
-                    linewidth = 2.5 if impl == 'L0 Native' else 2.0
+                    style = impl_styles[impl]
                     ax.plot(grouped['size_kib'], grouped['gib_per_s'], 
-                           marker='o', linewidth=linewidth, markersize=6,
-                           linestyle=linestyle, label=impl, alpha=0.9)
+                           label=impl, markersize=6, **style)
             
             ax.set_xscale('log', base=2)
             ax.set_yscale('log')
@@ -213,7 +229,7 @@ def plot_sycl_vs_native(df, output_dir, metadata=None):
             ax.legend()
         
         plt.tight_layout()
-        output_file = output_dir / f'sycl_vs_native_{op.lower()}.png'
+        output_file = output_dir / f'implementation_comparison_{op.lower()}.png'
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"Saved: {output_file}")
         plt.close()
@@ -602,17 +618,19 @@ def main():
     # Generate plots
     print("\n=== Generating Plots ===")
     
-    # Check if we have SYCL vs Native comparison data
+    # Check if we have implementation comparison data
     if 'implementation' in df.columns:
         implementations = df['implementation'].unique()
         print(f"Implementations in data: {', '.join(implementations)}")
-        if 'SYCL' in implementations and 'L0 Native' in implementations:
-            print("\n--- SYCL vs Level Zero Native Comparison ---")
+        
+        # Check if we have multiple implementations to compare
+        if len(implementations) > 1:
+            print("\n--- Implementation Comparison ---")
             plot_sycl_vs_native(df, output_dir, metadata)
         else:
-            print(f"\nSkipping SYCL vs Native comparison (found: {', '.join(implementations)})")
+            print(f"\nSkipping implementation comparison (only found: {', '.join(implementations)})")
     else:
-        print("\nNo 'implementation' column found - skipping SYCL vs Native comparison")
+        print("\nNo 'implementation' column found - skipping implementation comparison")
     
     plot_bandwidth_comparison(df, output_dir, metadata)
     plot_mode_comparison(df, output_dir)

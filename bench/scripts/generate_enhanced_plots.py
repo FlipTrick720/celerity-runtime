@@ -31,9 +31,13 @@ def load_all_versions(results_dir):
                 if 'backend' in df.columns and len(df) > 0:
                     backend_val = df['backend'].iloc[0]
                     if 'native' in backend_val.lower():
-                        df['implementation'] = 'Native'
+                        df['implementation'] = 'L0 Native'
+                    elif 'level_zero' in backend_val.lower():
+                        df['implementation'] = 'L0 Backend'
+                    elif 'opencl' in backend_val.lower() or 'generic' in backend_val.lower():
+                        df['implementation'] = 'Generic SYCL'
                     else:
-                        df['implementation'] = 'SYCL'
+                        df['implementation'] = 'L0 Backend'
                 
                 # Extract version from directory name
                 dir_name = version_dir.name
@@ -57,8 +61,24 @@ def load_all_versions(results_dir):
     return combined[combined['bench'].str.contains('memcpy', case=False, na=False)].copy()
 
 def plot_speedup_heatmap(df, output_dir):
-    """Create heatmap showing Native speedup over SYCL for each variant."""
+    """Create heatmap showing L0 Native speedup over L0 Backend for each variant."""
     output_dir = Path(output_dir)
+    
+    # Determine what implementations we have
+    implementations = df['implementation'].unique()
+    
+    # Decide comparison: prefer L0 Backend vs L0 Native, fallback to Generic SYCL vs L0 Backend
+    if 'L0 Backend' in implementations and 'L0 Native' in implementations:
+        baseline_impl = 'L0 Backend'
+        compare_impl = 'L0 Native'
+        title_suffix = 'L0 Native vs L0 Backend'
+    elif 'Generic SYCL' in implementations and 'L0 Backend' in implementations:
+        baseline_impl = 'Generic SYCL'
+        compare_impl = 'L0 Backend'
+        title_suffix = 'L0 Backend vs Generic SYCL'
+    else:
+        print("  Not enough implementations for speedup heatmap")
+        return
     
     # Calculate speedup for each version/operation/mode combination
     speedups = []
@@ -70,26 +90,26 @@ def plot_speedup_heatmap(df, output_dir):
     for version in versions:
         for op in operations:
             for mode, pinned in modes:
-                sycl_data = df[
+                baseline_data = df[
                     (df['version'] == version) &
-                    (df['implementation'] == 'SYCL') &
+                    (df['implementation'] == baseline_impl) &
                     (df['op'] == op) &
                     (df['mode'] == mode) &
                     (df['pinned'] == pinned)
                 ]
                 
-                native_data = df[
+                compare_data = df[
                     (df['version'] == version) &
-                    (df['implementation'] == 'Native') &
+                    (df['implementation'] == compare_impl) &
                     (df['op'] == op) &
                     (df['mode'] == mode) &
                     (df['pinned'] == pinned)
                 ]
                 
-                if not sycl_data.empty and not native_data.empty:
-                    sycl_peak = sycl_data['gib_per_s'].max()
-                    native_peak = native_data['gib_per_s'].max()
-                    speedup = native_peak / sycl_peak
+                if not baseline_data.empty and not compare_data.empty:
+                    baseline_peak = baseline_data['gib_per_s'].max()
+                    compare_peak = compare_data['gib_per_s'].max()
+                    speedup = compare_peak / baseline_peak
                     
                     mode_label = f"{mode.capitalize()}+Pin"
                     speedups.append({
@@ -115,7 +135,7 @@ def plot_speedup_heatmap(df, output_dir):
                 vmin=0.9, vmax=1.1, cbar_kws={'label': 'Speedup (Native/SYCL)'},
                 linewidths=0.5, ax=ax)
     
-    ax.set_title('Native vs SYCL Speedup Heatmap\n(Green = Native Faster, Red = SYCL Faster)', 
+    ax.set_title(f'{title_suffix} Speedup Heatmap\n(Green = {compare_impl} Faster, Red = {baseline_impl} Faster)', 
                 fontsize=14, fontweight='bold', pad=20)
     ax.set_xlabel('Configuration', fontsize=12)
     ax.set_ylabel('Backend Version', fontsize=12)
@@ -127,15 +147,30 @@ def plot_speedup_heatmap(df, output_dir):
     plt.close()
 
 def plot_improvement_bars(df, output_dir):
-    """Create bar chart showing percentage improvement of Native over SYCL."""
+    """Create bar chart showing percentage improvement."""
     output_dir = Path(output_dir)
+    
+    # Determine what implementations we have
+    implementations = df['implementation'].unique()
+    
+    # Decide comparison
+    if 'L0 Backend' in implementations and 'L0 Native' in implementations:
+        baseline_impl = 'L0 Backend'
+        compare_impl = 'L0 Native'
+        title = 'L0 Native Performance Improvement over L0 Backend (%)'
+    elif 'Generic SYCL' in implementations and 'L0 Backend' in implementations:
+        baseline_impl = 'Generic SYCL'
+        compare_impl = 'L0 Backend'
+        title = 'L0 Backend Performance Improvement over Generic SYCL (%)'
+    else:
+        print("  Not enough implementations for improvement bars")
+        return
     
     versions = sorted(df['version'].unique())
     operations = ['D2D', 'H2D', 'D2H']
     
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle('Native Performance Improvement over SYCL (%)', 
-                fontsize=16, fontweight='bold')
+    fig.suptitle(title, fontsize=16, fontweight='bold')
     
     for idx, op in enumerate(operations):
         ax = axes[idx]
@@ -145,26 +180,26 @@ def plot_improvement_bars(df, output_dir):
         
         for version in versions:
             # Use batch+pinned as representative
-            sycl_data = df[
+            baseline_data = df[
                 (df['version'] == version) &
-                (df['implementation'] == 'SYCL') &
+                (df['implementation'] == baseline_impl) &
                 (df['op'] == op) &
                 (df['mode'] == 'batch') &
                 (df['pinned'] == 'yes')
             ]
             
-            native_data = df[
+            compare_data = df[
                 (df['version'] == version) &
-                (df['implementation'] == 'Native') &
+                (df['implementation'] == compare_impl) &
                 (df['op'] == op) &
                 (df['mode'] == 'batch') &
                 (df['pinned'] == 'yes')
             ]
             
-            if not sycl_data.empty and not native_data.empty:
-                sycl_peak = sycl_data['gib_per_s'].max()
-                native_peak = native_data['gib_per_s'].max()
-                improvement = ((native_peak / sycl_peak) - 1) * 100
+            if not baseline_data.empty and not compare_data.empty:
+                baseline_peak = baseline_data['gib_per_s'].max()
+                compare_peak = compare_data['gib_per_s'].max()
+                improvement = ((compare_peak / baseline_peak) - 1) * 100
                 
                 improvements.append(improvement)
                 # Shorten version names for readability
