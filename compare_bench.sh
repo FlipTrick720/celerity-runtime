@@ -112,6 +112,16 @@ if [[ ${#VERSIONS[@]} -ge 2 ]]; then
 fi
 
 # ============================================
+# Generate Enhanced Comparison Plots
+# ============================================
+if [[ ${found_versions} -ge 2 ]]; then
+    echo "=== Generating Enhanced Comparison Plots ==="
+    echo ""
+    python3 scripts/generate_enhanced_plots.py results comparison_all
+    echo ""
+fi
+
+# ============================================
 # Summary
 # ============================================
 echo "========================================="

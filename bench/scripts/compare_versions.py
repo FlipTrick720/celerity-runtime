@@ -53,6 +53,26 @@ def load_version_data(result_dir):
         try:
             df = pd.read_csv(csv_file)
             df['backend_version'] = version_tag
+            
+            # Determine implementation type from backend column or filename
+            if 'backend' in df.columns:
+                backend_val = df['backend'].iloc[0] if len(df) > 0 else ''
+                if 'native' in backend_val.lower():
+                    df['implementation'] = 'L0 Native'
+                elif 'cuda' in backend_val.lower():
+                    df['implementation'] = 'CUDA'
+                else:
+                    df['implementation'] = 'SYCL'
+            else:
+                # Fallback to filename detection
+                filename = csv_file.name
+                if 'l0_native_' in filename or 'native_' in filename:
+                    df['implementation'] = 'L0 Native'
+                elif 'cuda_' in filename:
+                    df['implementation'] = 'CUDA'
+                else:
+                    df['implementation'] = 'SYCL'
+            
             dfs.append(df)
         except Exception as e:
             print(f"Error loading {csv_file}: {e}")
@@ -174,6 +194,65 @@ def plot_mode_comparison(versions_data, output_dir):
     print(f"Saved: {output_file}")
     plt.close()
 
+def plot_sycl_vs_native_comparison(versions_data, output_dir):
+    """Plot SYCL vs Native comparison across all versions."""
+    output_dir = Path(output_dir)
+    
+    all_data = pd.concat([df for df, _ in versions_data], ignore_index=True)
+    memcpy_df = all_data[all_data['bench'].str.contains('memcpy', case=False, na=False)].copy()
+    memcpy_df['size_kib'] = memcpy_df['bytes'] / 1024
+    
+    operations = ['D2D', 'H2D', 'D2H']
+    
+    for op in operations:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'{op}: SYCL vs Level Zero Native (All Versions)', fontsize=16, fontweight='bold')
+        
+        modes = [
+            ('sync', 'yes', 'Sync + Pinned'),
+            ('sync', 'no', 'Sync + Pageable'),
+            ('batch', 'yes', 'Batch + Pinned'),
+            ('batch', 'no', 'Batch + Pageable')
+        ]
+        
+        for idx, (mode, pinned, title) in enumerate(modes):
+            ax = axes[idx // 2, idx % 2]
+            
+            # Plot each version's SYCL and Native
+            for _, version_tag in versions_data:
+                version_data = memcpy_df[memcpy_df['backend_version'] == version_tag]
+                
+                for impl in ['SYCL', 'L0 Native']:
+                    data = version_data[
+                        (version_data['op'] == op) &
+                        (version_data['implementation'] == impl) &
+                        (version_data['mode'] == mode) &
+                        (version_data['pinned'] == pinned)
+                    ]
+                    
+                    if not data.empty:
+                        grouped = data.groupby('size_kib')['gib_per_s'].median().reset_index()
+                        linestyle = '-' if impl == 'L0 Native' else '--'
+                        linewidth = 2.0 if impl == 'L0 Native' else 1.5
+                        label = f"{version_tag} ({impl})"
+                        ax.plot(grouped['size_kib'], grouped['gib_per_s'],
+                               marker='o', linestyle=linestyle, linewidth=linewidth,
+                               markersize=4, label=label, alpha=0.8)
+            
+            ax.set_xscale('log', base=2)
+            ax.set_yscale('log')
+            ax.set_xlabel('Transfer Size (KiB)')
+            ax.set_ylabel('Bandwidth (GiB/s)')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3, which='both')
+            ax.legend(fontsize=7, loc='best')
+        
+        plt.tight_layout()
+        output_file = output_dir / f'sycl_vs_native_all_versions_{op.lower()}.png'
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"Saved: {output_file}")
+        plt.close()
+
 def generate_comparison_table(versions_data, output_dir):
     """Generate comparison table of peak bandwidths."""
     output_dir = Path(output_dir)
@@ -270,6 +349,14 @@ def main():
     print("\n=== Generating Comparison Plots ===")
     plot_version_comparison(versions_data, output_dir)
     plot_mode_comparison(versions_data, output_dir)
+    
+    # Check if we have SYCL vs Native data to compare
+    all_data = pd.concat([df for df, _ in versions_data], ignore_index=True)
+    if 'implementation' in all_data.columns:
+        implementations = all_data['implementation'].unique()
+        if 'SYCL' in implementations and 'L0 Native' in implementations:
+            print("\n=== Generating SYCL vs Native Comparison ===")
+            plot_sycl_vs_native_comparison(versions_data, output_dir)
     
     # Generate comparison table
     print("\n=== Generating Comparison Table ===")

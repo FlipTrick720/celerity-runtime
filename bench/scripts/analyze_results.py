@@ -59,6 +59,27 @@ def load_all_csvs(results_dir):
     for csv_file in csv_files:
         try:
             df = pd.read_csv(csv_file)
+            
+            # Determine implementation type from backend column or filename
+            if 'backend' in df.columns:
+                # Use backend column to determine implementation
+                backend_val = df['backend'].iloc[0] if len(df) > 0 else ''
+                if 'native' in backend_val.lower():
+                    df['implementation'] = 'L0 Native'
+                elif 'cuda' in backend_val.lower():
+                    df['implementation'] = 'CUDA'
+                else:
+                    df['implementation'] = 'SYCL'
+            else:
+                # Fallback to filename detection
+                filename = csv_file.name
+                if 'l0_native_' in filename or 'native_' in filename:
+                    df['implementation'] = 'L0 Native'
+                elif 'cuda_' in filename:
+                    df['implementation'] = 'CUDA'
+                else:
+                    df['implementation'] = 'SYCL'
+            
             # Add backend version info if available from metadata
             if metadata and 'Backend Tag' in metadata:
                 df['backend_version'] = metadata['Backend Tag']
@@ -81,7 +102,8 @@ def load_all_csvs(results_dir):
                     df['backend_version'] = 'unknown'
             
             dfs.append(df)
-            print(f"  Loaded: {csv_file.name}")
+            impl_label = df['implementation'].iloc[0] if 'implementation' in df.columns else 'unknown'
+            print(f"  Loaded: {csv_file.name} ({impl_label})")
         except Exception as e:
             print(f"  Error loading {csv_file.name}: {e}")
     
@@ -111,7 +133,90 @@ def load_all_csvs(results_dir):
             combined = combined.drop_duplicates(subset=dedup_cols, keep='first')
     
     print(f"Total rows after dedup: {len(combined)}")
+    
+    # Report implementations found
+    if 'implementation' in combined.columns:
+        implementations = combined['implementation'].unique()
+        print(f"Implementations found: {', '.join(implementations)}")
+        if 'L0 Native' in implementations and 'SYCL' in implementations:
+            print("✓ Both SYCL and Level Zero Native data found - will generate comparison plots")
+    
     return combined, metadata
+
+def plot_sycl_vs_native(df, output_dir, metadata=None):
+    """Plot SYCL vs Level Zero Native comparison if both are available."""
+    # Filter for memcpy benchmarks (handle both 'memcpy_linear' and 'memcpy_linear_l0')
+    memcpy_df = df[df['bench'].str.contains('memcpy', case=False, na=False)].copy()
+    
+    if memcpy_df.empty:
+        print("  No memcpy data found for SYCL vs Native comparison")
+        return
+    
+    # Check if we have both SYCL and Native
+    if 'implementation' not in memcpy_df.columns:
+        print("  No 'implementation' column found")
+        return
+    
+    implementations = memcpy_df['implementation'].unique()
+    print(f"  Implementations found: {', '.join(implementations)}")
+    
+    if 'SYCL' not in implementations or 'L0 Native' not in implementations:
+        print(f"  Missing SYCL or L0 Native data (found: {', '.join(implementations)})")
+        return
+    
+    print(f"  Generating SYCL vs Native comparison plots...")
+    
+    memcpy_df['size_kib'] = memcpy_df['bytes'] / 1024
+    
+    version_str = ""
+    if metadata and 'Backend Tag' in metadata:
+        version_str = f" ({metadata['Backend Tag']})"
+    
+    operations = ['D2D', 'H2D', 'D2H']
+    
+    for op in operations:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'{op}: SYCL vs Level Zero Native{version_str}', fontsize=16, fontweight='bold')
+        
+        modes = [
+            ('sync', 'yes', 'Sync + Pinned'),
+            ('sync', 'no', 'Sync + Pageable'),
+            ('batch', 'yes', 'Batch + Pinned'),
+            ('batch', 'no', 'Batch + Pageable')
+        ]
+        
+        for idx, (mode, pinned, title) in enumerate(modes):
+            ax = axes[idx // 2, idx % 2]
+            
+            for impl in ['SYCL', 'L0 Native']:
+                data = memcpy_df[
+                    (memcpy_df['op'] == op) &
+                    (memcpy_df['implementation'] == impl) &
+                    (memcpy_df['mode'] == mode) &
+                    (memcpy_df['pinned'] == pinned)
+                ]
+                
+                if not data.empty:
+                    grouped = data.groupby('size_kib')['gib_per_s'].median().reset_index()
+                    linestyle = '-' if impl == 'L0 Native' else '--'
+                    linewidth = 2.5 if impl == 'L0 Native' else 2.0
+                    ax.plot(grouped['size_kib'], grouped['gib_per_s'], 
+                           marker='o', linewidth=linewidth, markersize=6,
+                           linestyle=linestyle, label=impl, alpha=0.9)
+            
+            ax.set_xscale('log', base=2)
+            ax.set_yscale('log')
+            ax.set_xlabel('Transfer Size (KiB)')
+            ax.set_ylabel('Bandwidth (GiB/s)')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3, which='both')
+            ax.legend()
+        
+        plt.tight_layout()
+        output_file = output_dir / f'sycl_vs_native_{op.lower()}.png'
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"Saved: {output_file}")
+        plt.close()
 
 def plot_bandwidth_comparison(df, output_dir, metadata=None):
     """Plot bandwidth comparison: Level Zero vs CUDA for all modes."""
@@ -496,6 +601,19 @@ def main():
     
     # Generate plots
     print("\n=== Generating Plots ===")
+    
+    # Check if we have SYCL vs Native comparison data
+    if 'implementation' in df.columns:
+        implementations = df['implementation'].unique()
+        print(f"Implementations in data: {', '.join(implementations)}")
+        if 'SYCL' in implementations and 'L0 Native' in implementations:
+            print("\n--- SYCL vs Level Zero Native Comparison ---")
+            plot_sycl_vs_native(df, output_dir, metadata)
+        else:
+            print(f"\nSkipping SYCL vs Native comparison (found: {', '.join(implementations)})")
+    else:
+        print("\nNo 'implementation' column found - skipping SYCL vs Native comparison")
+    
     plot_bandwidth_comparison(df, output_dir, metadata)
     plot_mode_comparison(df, output_dir)
     plot_overhead_analysis(df, output_dir)
