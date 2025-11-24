@@ -225,15 +225,26 @@ for variant in baseline variant6 variant9 variant1 variant2 variant3 variant4 va
     # Copy reference benchmarks to variant results
     if [[ -n "$REFERENCE_DIR" ]] && [[ -d "$REFERENCE_DIR" ]]; then
         echo "Copying reference benchmarks to variant results..."
-        # Find the variant's result directory
-        VARIANT_RESULT_DIR=$(find "$VARIANT_DIR" -type d -name "results_*" 2>/dev/null | head -1)
+        # Find the variant's result directory in bench/results/
+        VARIANT_RESULT_DIR=$(find bench/results -type d -name "results_${BACKEND_TAG}_*" 2>/dev/null | sort | tail -1)
         if [[ -n "$VARIANT_RESULT_DIR" ]] && [[ -d "$VARIANT_RESULT_DIR" ]]; then
             # Copy all reference CSV files
-            cp "$REFERENCE_DIR"/*.csv "$VARIANT_RESULT_DIR/" 2>/dev/null && \
-                echo "✓ Reference results copied" || \
+            if cp "$REFERENCE_DIR"/*.csv "$VARIANT_RESULT_DIR/" 2>/dev/null; then
+                echo "✓ Reference results copied to $VARIANT_RESULT_DIR"
+                echo "   Files copied: $(ls "$REFERENCE_DIR"/*.csv 2>/dev/null | wc -l)"
+                
+                # Also create a copy in the variant directory for easy access
+                mkdir -p "$VARIANT_DIR/bench/results"
+                cp -r "$VARIANT_RESULT_DIR" "$VARIANT_DIR/bench/results/" 2>/dev/null
+                echo "✓ Results also copied to $VARIANT_DIR/bench/results/"
+            else
                 echo "⚠️  Could not copy reference results"
+            fi
         else
             echo "⚠️  Could not find variant result directory"
+            echo "   Looking for: bench/results/results_${BACKEND_TAG}_*"
+            echo "   Available directories:"
+            ls -d bench/results/results_* 2>/dev/null | tail -3 || echo "   (none found)"
         fi
     fi
        
