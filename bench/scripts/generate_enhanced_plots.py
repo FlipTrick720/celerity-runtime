@@ -22,8 +22,23 @@ def load_all_versions(results_dir):
     
     all_data = []
     reference_data = {}  # Store reference implementations separately
+    all_versions = []  # Track all version names
     
     for version_dir in version_dirs:
+        # Extract version from directory name
+        dir_name = version_dir.name
+        version_tag = 'unknown'
+        if 'results_' in dir_name:
+            parts = dir_name.split('_')
+            version_parts = []
+            for i in range(1, len(parts)):
+                if parts[i].isdigit() and len(parts[i]) == 8:
+                    break
+                version_parts.append(parts[i])
+            version_tag = '_'.join(version_parts) if version_parts else 'unknown'
+        
+        all_versions.append(version_tag)
+        
         csv_files = list(version_dir.glob("*.csv"))
         for csv_file in csv_files:
             try:
@@ -41,16 +56,7 @@ def load_all_versions(results_dir):
                     else:
                         df['implementation'] = 'L0 Backend'
                 
-                # Extract version from directory name
-                dir_name = version_dir.name
-                if 'results_' in dir_name:
-                    parts = dir_name.split('_')
-                    version_parts = []
-                    for i in range(1, len(parts)):
-                        if parts[i].isdigit() and len(parts[i]) == 8:
-                            break
-                        version_parts.append(parts[i])
-                    df['version'] = '_'.join(version_parts) if version_parts else 'unknown'
+                df['version'] = version_tag
                 
                 # For reference implementations (L0 Native, Generic SYCL), 
                 # only keep the first occurrence (they're the same across all variants)
@@ -68,8 +74,11 @@ def load_all_versions(results_dir):
                 continue
     
     # Add reference data back (one copy each)
-    for impl, df in reference_data.items():
-        all_data.append(df)
+    # For comparison purposes, we'll keep the version from the first variant
+    for impl, df_ref in reference_data.items():
+        # Keep the reference data with its original version tag
+        all_data.append(df_ref)
+        print(f"  Added {impl} reference: {len(df_ref)} rows, version={df_ref['version'].iloc[0] if len(df_ref) > 0 else 'unknown'}")
     
     if not all_data:
         return None
@@ -170,20 +179,30 @@ def plot_improvement_bars(df, output_dir):
     # Determine what implementations we have
     implementations = df['implementation'].unique()
     
-    # Decide comparison
-    if 'L0 Backend' in implementations and 'L0 Native' in implementations:
-        baseline_impl = 'L0 Backend'
-        compare_impl = 'L0 Native'
-        title = 'L0 Native Performance Improvement over L0 Backend (%)'
-    elif 'Generic SYCL' in implementations and 'L0 Backend' in implementations:
+    # Decide comparison - prioritize showing L0 Backend improvement over Generic SYCL
+    if 'Generic SYCL' in implementations and 'L0 Backend' in implementations:
         baseline_impl = 'Generic SYCL'
         compare_impl = 'L0 Backend'
         title = 'L0 Backend Performance Improvement over Generic SYCL (%)'
+    elif 'L0 Backend' in implementations and 'L0 Native' in implementations:
+        baseline_impl = 'L0 Backend'
+        compare_impl = 'L0 Native'
+        title = 'L0 Native Performance Improvement over L0 Backend (%)'
     else:
         print("  Not enough implementations for improvement bars")
         return
     
-    versions = sorted(df['version'].unique())
+    # Get backend versions (exclude reference implementations)
+    backend_versions = sorted([v for v in df['version'].unique() 
+                               if v not in ['L0 Native', 'Generic SYCL', 'unknown']])
+    
+    print(f"  Backend versions found: {len(backend_versions)}")
+    print(f"  Comparing {compare_impl} vs {baseline_impl}")
+    
+    if not backend_versions:
+        print("  No backend versions found for improvement bars")
+        return
+    
     operations = ['D2D', 'H2D', 'D2H']
     
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
@@ -195,8 +214,33 @@ def plot_improvement_bars(df, output_dir):
         improvements = []
         labels = []
         
-        for version in versions:
-            # Use batch+pinned as representative
+        # Get reference implementation data (same for all versions)
+        compare_data = df[
+            (df['implementation'] == compare_impl) &
+            (df['op'] == op) &
+            (df['mode'] == 'batch') &
+            (df['pinned'] == 'yes')
+        ]
+        
+        # Debug: Check what data we have
+        all_compare_data = df[df['implementation'] == compare_impl]
+        if idx == 0:  # Only print once
+            print(f"    {compare_impl} total rows: {len(all_compare_data)}")
+            if len(all_compare_data) > 0:
+                print(f"    {compare_impl} ops: {all_compare_data['op'].unique()}")
+                print(f"    {compare_impl} modes: {all_compare_data['mode'].unique()}")
+                print(f"    {compare_impl} pinned: {all_compare_data['pinned'].unique()}")
+        
+        if compare_data.empty:
+            ax.text(0.5, 0.5, f'No {compare_impl} data for {op}',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f'{op} (Batch+Pinned)', fontsize=12)
+            continue
+        
+        compare_peak = compare_data['gib_per_s'].max()
+        
+        for version in backend_versions:
+            # Get backend data for this version
             baseline_data = df[
                 (df['version'] == version) &
                 (df['implementation'] == baseline_impl) &
@@ -205,23 +249,20 @@ def plot_improvement_bars(df, output_dir):
                 (df['pinned'] == 'yes')
             ]
             
-            compare_data = df[
-                (df['version'] == version) &
-                (df['implementation'] == compare_impl) &
-                (df['op'] == op) &
-                (df['mode'] == 'batch') &
-                (df['pinned'] == 'yes')
-            ]
-            
-            if not baseline_data.empty and not compare_data.empty:
+            if not baseline_data.empty:
                 baseline_peak = baseline_data['gib_per_s'].max()
-                compare_peak = compare_data['gib_per_s'].max()
                 improvement = ((compare_peak / baseline_peak) - 1) * 100
                 
                 improvements.append(improvement)
                 # Shorten version names for readability
                 short_name = version.replace('_', '\n').replace('v', 'v')
                 labels.append(short_name)
+        
+        if not improvements:
+            ax.text(0.5, 0.5, f'No {baseline_impl} data for {op}',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f'{op} (Batch+Pinned)', fontsize=12)
+            continue
         
         # Create bar chart
         colors = ['green' if x > 0 else 'red' for x in improvements]
@@ -255,73 +296,70 @@ def plot_normalized_performance(df, output_dir):
     # Get baseline performance
     baseline_version = 'v0_baseline'
     
-    # Determine available implementations
-    available_impls = df['implementation'].unique()
-    impl_map = {}
-    if 'L0 Backend' in available_impls:
-        impl_map['L0 Backend'] = 'L0 Backend'
-    if 'L0 Native' in available_impls:
-        impl_map['L0 Native'] = 'L0 Native'
-    if 'Generic SYCL' in available_impls:
-        impl_map['Generic SYCL'] = 'Generic SYCL'
+    # Only normalize L0 Backend variants (not reference implementations)
+    if 'L0 Backend' not in df['implementation'].unique():
+        print("  No L0 Backend data for normalized performance plots")
+        return
     
-    if len(impl_map) < 2:
-        print("  Not enough implementations for normalized performance plots")
+    # Get backend versions (exclude reference implementations)
+    backend_versions = sorted([v for v in df['version'].unique() 
+                               if v not in ['L0 Native', 'Generic SYCL', 'unknown']])
+    
+    if not backend_versions or baseline_version not in backend_versions:
+        print(f"  Baseline version {baseline_version} not found")
         return
     
     operations = ['D2D', 'H2D', 'D2H']
     
     for op in operations:
-        fig, axes = plt.subplots(1, len(impl_map), figsize=(8 * len(impl_map), 6))
-        if len(impl_map) == 1:
-            axes = [axes]
-        fig.suptitle(f'{op} Performance Normalized to Baseline', 
+        fig, ax = plt.subplots(1, 1, figsize=(14, 6))
+        fig.suptitle(f'{op} Performance Normalized to Baseline (L0 Backend)', 
                     fontsize=16, fontweight='bold')
         
-        for impl_idx, (impl_name, impl_label) in enumerate(impl_map.items()):
-            ax = axes[impl_idx]
-            
-            # Get baseline performance
-            baseline_data = df[
-                (df['version'] == baseline_version) &
-                (df['implementation'] == impl_name) &
+        # Get baseline performance
+        baseline_data = df[
+            (df['version'] == baseline_version) &
+            (df['implementation'] == 'L0 Backend') &
+            (df['op'] == op) &
+            (df['mode'] == 'batch') &
+            (df['pinned'] == 'yes')
+        ]
+        
+        if baseline_data.empty:
+            ax.text(0.5, 0.5, f'No baseline data for {baseline_version}',
+                   ha='center', va='center', transform=ax.transAxes)
+            plt.tight_layout()
+            output_file = output_dir / f'normalized_performance_{op.lower()}.png'
+            plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            print(f"Saved: {output_file}")
+            plt.close()
+            continue
+        
+        baseline_peak = baseline_data['gib_per_s'].max()
+        
+        # Plot normalized performance for each backend version
+        normalized_perfs = []
+        labels = []
+        
+        for version in backend_versions:
+            version_data = df[
+                (df['version'] == version) &
+                (df['implementation'] == 'L0 Backend') &
                 (df['op'] == op) &
                 (df['mode'] == 'batch') &
                 (df['pinned'] == 'yes')
             ]
-            
-            if baseline_data.empty:
-                ax.text(0.5, 0.5, f'No baseline data for {impl_label}',
-                       ha='center', va='center', transform=ax.transAxes)
-                continue
-            
-            baseline_peak = baseline_data['gib_per_s'].max()
-            
-            # Plot normalized performance for each version
-            versions = sorted(df['version'].unique())
-            normalized_perfs = []
-            labels = []
-            
-            for version in versions:
-                version_data = df[
-                    (df['version'] == version) &
-                    (df['implementation'] == impl_name) &
-                    (df['op'] == op) &
-                    (df['mode'] == 'batch') &
-                    (df['pinned'] == 'yes')
-                ]
                 
-                if not version_data.empty:
-                    peak = version_data['gib_per_s'].max()
-                    normalized = (peak / baseline_peak) * 100
-                    normalized_perfs.append(normalized)
-                    labels.append(version.replace('_', '\n'))
-            
-            if not normalized_perfs:
-                ax.text(0.5, 0.5, f'No data for {impl_label}',
-                       ha='center', va='center', transform=ax.transAxes)
-                continue
-            
+            if not version_data.empty:
+                peak = version_data['gib_per_s'].max()
+                normalized = (peak / baseline_peak) * 100
+                normalized_perfs.append(normalized)
+                labels.append(version.replace('_', '\n'))
+        
+        if not normalized_perfs:
+            ax.text(0.5, 0.5, 'No data',
+                   ha='center', va='center', transform=ax.transAxes)
+        else:
             # Create bar chart
             colors = ['green' if x >= 100 else 'orange' for x in normalized_perfs]
             bars = ax.bar(range(len(normalized_perfs)), normalized_perfs, 
@@ -331,16 +369,25 @@ def plot_normalized_performance(df, output_dir):
             for bar, val in zip(bars, normalized_perfs):
                 height = bar.get_height()
                 ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{val:.1f}%', ha='center', va='bottom',
-                       fontsize=9, fontweight='bold')
+                       f'{val:.2f}%', ha='center', va='bottom',
+                       fontsize=8, fontweight='bold')
             
             ax.axhline(y=100, color='red', linestyle='--', linewidth=1.5, 
-                      label='Baseline', alpha=0.7)
+                      label='Baseline (100%)', alpha=0.7)
             ax.set_xlabel('Backend Version', fontsize=10)
             ax.set_ylabel('Performance (% of Baseline)', fontsize=10)
-            ax.set_title(f'{impl_label}', fontsize=12)
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+            
+            # Zoom in on the differences if they're all close to 100%
+            min_val = min(normalized_perfs)
+            max_val = max(normalized_perfs)
+            if max_val - min_val < 5:  # If all within 5%
+                # Zoom in to show small differences
+                y_center = (min_val + max_val) / 2
+                y_range = max(5, max_val - min_val + 2)  # At least 5% range
+                ax.set_ylim(y_center - y_range/2, y_center + y_range/2)
+            
             ax.grid(True, alpha=0.3, axis='y')
             ax.legend()
         
@@ -375,15 +422,19 @@ def plot_best_variant_summary(df, output_dir):
             # Find best variant for each implementation
             best_results = []
             
-            for impl in available_impls:
-                versions = df['version'].unique()
+            # Get backend versions (exclude reference implementations)
+            backend_versions = [v for v in df['version'].unique() 
+                               if v not in ['L0 Native', 'Generic SYCL', 'unknown']]
+            
+            # For L0 Backend, find the best variant
+            if 'L0 Backend' in available_impls and backend_versions:
                 best_perf = 0
                 best_version = None
                 
-                for version in versions:
+                for version in backend_versions:
                     version_data = df[
                         (df['version'] == version) &
-                        (df['implementation'] == impl) &
+                        (df['implementation'] == 'L0 Backend') &
                         (df['op'] == op) &
                         (df['mode'] == mode) &
                         (df['pinned'] == pinned)
@@ -397,10 +448,27 @@ def plot_best_variant_summary(df, output_dir):
                 
                 if best_version:
                     best_results.append({
-                        'impl': impl,
+                        'impl': 'L0 Backend',
                         'version': best_version,
                         'perf': best_perf
                     })
+            
+            # For reference implementations, just get their performance
+            for ref_impl in ['Generic SYCL', 'L0 Native']:
+                if ref_impl in available_impls:
+                    ref_data = df[
+                        (df['implementation'] == ref_impl) &
+                        (df['op'] == op) &
+                        (df['mode'] == mode) &
+                        (df['pinned'] == pinned)
+                    ]
+                    
+                    if not ref_data.empty:
+                        best_results.append({
+                            'impl': ref_impl,
+                            'version': ref_impl,
+                            'perf': ref_data['gib_per_s'].max()
+                        })
             
             # Plot
             if best_results:
@@ -453,12 +521,18 @@ def main():
     print(f"Versions: {', '.join(sorted(df['version'].unique()))}")
     print(f"Implementations: {', '.join(df['implementation'].unique())}")
     
+    # Debug: Show data distribution
+    for impl in df['implementation'].unique():
+        impl_data = df[df['implementation'] == impl]
+        versions = impl_data['version'].unique()
+        print(f"  {impl}: {len(impl_data)} rows, versions: {', '.join(sorted(versions))}")
+    
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
     print("\n=== Generating Enhanced Plots ===")
     plot_speedup_heatmap(df, output_path)
-    plot_improvement_bars(df, output_path)
+    # plot_improvement_bars(df, output_path)  # Disabled - data loading issues
     plot_normalized_performance(df, output_path)
     plot_best_variant_summary(df, output_path)
     

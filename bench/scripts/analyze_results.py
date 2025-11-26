@@ -6,6 +6,7 @@ Generates publication-quality plots comparing Level Zero vs CUDA performance.
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import seaborn as sns
 import numpy as np
 from pathlib import Path
@@ -20,6 +21,11 @@ plt.rcParams['font.size'] = 11
 plt.rcParams['axes.labelsize'] = 12
 plt.rcParams['axes.titlesize'] = 14
 plt.rcParams['legend.fontsize'] = 10
+
+def format_log_axes(ax):
+    """Format logarithmic axes with concrete numbers instead of scientific notation."""
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f'{int(x):,}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, p: f'{y:.0f}' if y >= 1 else f'{y:.1f}'))
 
 def load_metadata(results_dir):
     """Load metadata from results directory if available."""
@@ -222,6 +228,7 @@ def plot_sycl_vs_native(df, output_dir, metadata=None):
             
             ax.set_xscale('log', base=2)
             ax.set_yscale('log')
+            format_log_axes(ax)
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Bandwidth (GiB/s)')
             ax.set_title(title)
@@ -287,6 +294,7 @@ def plot_bandwidth_comparison(df, output_dir, metadata=None):
             
             ax.set_xscale('log', base=2)
             ax.set_yscale('log')
+            format_log_axes(ax)
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Bandwidth (GiB/s)')
             ax.set_title(title)
@@ -338,6 +346,7 @@ def plot_mode_comparison(df, output_dir):
             
             ax.set_xscale('log', base=2)
             ax.set_yscale('log')
+            format_log_axes(ax)
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Bandwidth (GiB/s)')
             ax.set_title(f'{op} Performance')
@@ -388,6 +397,7 @@ def plot_overhead_analysis(df, output_dir):
             
             ax.set_xscale('log', base=2)
             ax.set_yscale('log')
+            format_log_axes(ax)
             ax.set_xlabel('Transfer Size (KiB)')
             ax.set_ylabel('Latency (μs)')
             ax.set_title(f'{backend.upper()} - {op}')
