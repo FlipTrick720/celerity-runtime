@@ -21,6 +21,8 @@ def load_all_versions(results_dir):
     version_dirs = sorted([d for d in results_path.glob("results_*") if d.is_dir()])
     
     all_data = []
+    reference_data = {}  # Store reference implementations separately
+    
     for version_dir in version_dirs:
         csv_files = list(version_dir.glob("*.csv"))
         for csv_file in csv_files:
@@ -50,9 +52,24 @@ def load_all_versions(results_dir):
                         version_parts.append(parts[i])
                     df['version'] = '_'.join(version_parts) if version_parts else 'unknown'
                 
-                all_data.append(df)
+                # For reference implementations (L0 Native, Generic SYCL), 
+                # only keep the first occurrence (they're the same across all variants)
+                impl = df['implementation'].iloc[0] if len(df) > 0 else 'unknown'
+                if impl in ['L0 Native', 'Generic SYCL']:
+                    if impl not in reference_data:
+                        # First time seeing this reference implementation, keep it
+                        reference_data[impl] = df
+                    # Skip subsequent copies of the same reference data
+                else:
+                    # L0 Backend data - keep all variants
+                    all_data.append(df)
+                    
             except Exception as e:
                 continue
+    
+    # Add reference data back (one copy each)
+    for impl, df in reference_data.items():
+        all_data.append(df)
     
     if not all_data:
         return None

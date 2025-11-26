@@ -230,27 +230,44 @@ def plot_sycl_vs_native_comparison(versions_data, output_dir):
         for idx, (mode, pinned, title) in enumerate(modes):
             ax = axes[idx // 2, idx % 2]
             
-            # Plot each version's implementations
-            for _, version_tag in versions_data:
-                version_data = memcpy_df[memcpy_df['backend_version'] == version_tag]
+            # Plot reference implementations first (once each)
+            for ref_impl in ['Generic SYCL', 'L0 Native']:
+                if ref_impl not in implementations:
+                    continue
                 
-                for impl in ['Generic SYCL', 'L0 Backend', 'L0 Native']:
-                    if impl not in implementations:
-                        continue
-                        
-                    data = version_data[
-                        (version_data['op'] == op) &
-                        (version_data['implementation'] == impl) &
-                        (version_data['mode'] == mode) &
-                        (version_data['pinned'] == pinned)
-                    ]
-                    
-                    if not data.empty:
-                        grouped = data.groupby('size_kib')['gib_per_s'].median().reset_index()
-                        style = impl_styles.get(impl, {'linestyle': '-', 'linewidth': 1.5, 'alpha': 0.8})
-                        label = f"{version_tag} ({impl})"
-                        ax.plot(grouped['size_kib'], grouped['gib_per_s'],
-                               marker='o', markersize=3, label=label, **style)
+                ref_data = memcpy_df[
+                    (memcpy_df['implementation'] == ref_impl) &
+                    (memcpy_df['op'] == op) &
+                    (memcpy_df['mode'] == mode) &
+                    (memcpy_df['pinned'] == pinned)
+                ]
+                
+                if not ref_data.empty:
+                    grouped = ref_data.groupby('size_kib')['gib_per_s'].median().reset_index()
+                    style = impl_styles.get(ref_impl, {'linestyle': '-', 'linewidth': 1.5, 'alpha': 0.8})
+                    ax.plot(grouped['size_kib'], grouped['gib_per_s'],
+                           marker='o', markersize=3, label=ref_impl, **style)
+            
+            # Plot each backend variant
+            for _, version_tag in versions_data:
+                # Skip reference implementations (already plotted)
+                if version_tag in ['L0 Native', 'Generic SYCL']:
+                    continue
+                
+                version_data = memcpy_df[
+                    (memcpy_df['backend_version'] == version_tag) &
+                    (memcpy_df['implementation'] == 'L0 Backend') &
+                    (memcpy_df['op'] == op) &
+                    (memcpy_df['mode'] == mode) &
+                    (memcpy_df['pinned'] == pinned)
+                ]
+                
+                if not version_data.empty:
+                    grouped = version_data.groupby('size_kib')['gib_per_s'].median().reset_index()
+                    style = impl_styles.get('L0 Backend', {'linestyle': '--', 'linewidth': 1.8, 'alpha': 0.75})
+                    label = version_tag
+                    ax.plot(grouped['size_kib'], grouped['gib_per_s'],
+                           marker='o', markersize=3, label=label, **style)
             
             ax.set_xscale('log', base=2)
             ax.set_yscale('log')
@@ -335,15 +352,49 @@ def main():
     # Load all versions
     print("=== Loading Backend Versions ===")
     versions_data = []
+    reference_implementations = {}  # Store reference implementations separately
+    
     for result_dir in args.result_dirs:
         print(f"\nLoading: {result_dir}")
         df, version_tag = load_version_data(result_dir)
         if df is not None:
             print(f"  Version: {version_tag}")
             print(f"  Rows: {len(df)}")
-            versions_data.append((df, version_tag))
+            
+            # Separate reference implementations from backend implementations
+            if 'implementation' in df.columns:
+                # Split data by implementation
+                backend_data = df[df['implementation'] == 'L0 Backend'].copy()
+                native_data = df[df['implementation'] == 'L0 Native'].copy()
+                generic_data = df[df['implementation'] == 'Generic SYCL'].copy()
+                
+                # Store reference implementations only once (they're the same across all variants)
+                if not native_data.empty and 'L0 Native' not in reference_implementations:
+                    # Update backend_version to match the label we want
+                    native_data['backend_version'] = 'L0 Native'
+                    reference_implementations['L0 Native'] = (native_data, 'L0 Native')
+                    print(f"  Stored L0 Native reference data ({len(native_data)} rows)")
+                
+                if not generic_data.empty and 'Generic SYCL' not in reference_implementations:
+                    # Update backend_version to match the label we want
+                    generic_data['backend_version'] = 'Generic SYCL'
+                    reference_implementations['Generic SYCL'] = (generic_data, 'Generic SYCL')
+                    print(f"  Stored Generic SYCL reference data ({len(generic_data)} rows)")
+                
+                # Always keep backend data (unique per variant)
+                if not backend_data.empty:
+                    versions_data.append((backend_data, version_tag))
+                    print(f"  Stored L0 Backend data ({len(backend_data)} rows)")
+            else:
+                # No implementation column, keep all data
+                versions_data.append((df, version_tag))
         else:
             print(f"  No data found")
+    
+    # Add reference implementations back to versions_data
+    for impl_name, (ref_df, ref_tag) in reference_implementations.items():
+        versions_data.append((ref_df, ref_tag))
+        print(f"\nAdded {impl_name} reference data ({len(ref_df)} rows)")
     
     if len(versions_data) < 2:
         print("\nError: Need at least 2 versions to compare")
