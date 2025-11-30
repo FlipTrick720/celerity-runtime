@@ -531,12 +531,13 @@ def main():
     output_path.mkdir(parents=True, exist_ok=True)
     
     print("\n=== Generating Enhanced Plots ===")
-    plot_speedup_heatmap(df, output_path)
-    # plot_improvement_bars(df, output_path)  # Disabled - data loading issues
-    plot_normalized_performance(df, output_path)
-    plot_best_variant_summary(df, output_path)
+    # Disabled plots - keeping only implementation and version comparisons
+    # plot_speedup_heatmap(df, output_path)
+    # plot_improvement_bars(df, output_path)
+    # plot_normalized_performance(df, output_path)
+    # plot_best_variant_summary(df, output_path)
     
-    print(f"\n✅ Enhanced plots saved to {output_path}/")
+    print(f"\n✅ Enhanced plots generation skipped (using only implementation and version comparisons)")
     return 0
 
 if __name__ == '__main__':
